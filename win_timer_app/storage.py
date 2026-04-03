@@ -31,7 +31,16 @@ def default_data_path() -> Path:
 @dataclass
 class AppState:
     tasks: list[Task] = field(default_factory=list)
-    ui: dict[str, Any] = field(default_factory=lambda: {"filter_open_only": False})
+    ui: dict[str, Any] = field(
+        default_factory=lambda: {
+            "filter_open_only": False,
+            "focus_timer": {
+                "selected_minutes": 20,
+                "duration_minutes": None,
+                "ends_at": None,
+            },
+        }
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,9 +50,19 @@ class AppState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppState":
+        ui = data.get("ui", {})
+        ui.setdefault("filter_open_only", False)
+        ui.setdefault(
+            "focus_timer",
+            {
+                "selected_minutes": 20,
+                "duration_minutes": None,
+                "ends_at": None,
+            },
+        )
         return cls(
             tasks=[Task.from_dict(item) for item in data.get("tasks", [])],
-            ui=data.get("ui", {"filter_open_only": False}),
+            ui=ui,
         )
 
 

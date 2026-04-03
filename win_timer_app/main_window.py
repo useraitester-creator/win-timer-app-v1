@@ -321,6 +321,8 @@ class DaySection(QFrame):
 
 
 class MainWindow(QMainWindow):
+    focus_presets = (5, 10, 20, 30, 40)
+
     def __init__(self, controller: AppController, app: QApplication) -> None:
         super().__init__()
         self.controller = controller
@@ -329,8 +331,8 @@ class MainWindow(QMainWindow):
         self.app_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self.setWindowIcon(self.app_icon)
         self.setWindowTitle("Task Timer")
-        self.resize(1320, 820)
-        self.setMinimumSize(1100, 720)
+        self.resize(980, 680)
+        self.setMinimumSize(800, 600)
         self.create_dialog = CreateTaskDialog(self)
         self.create_dialog.create_requested.connect(self._create_task)
         self._build_ui()
@@ -348,11 +350,11 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         main_layout = QHBoxLayout(root)
-        main_layout.setContentsMargins(26, 26, 26, 26)
-        main_layout.setSpacing(24)
+        main_layout.setContentsMargins(18, 18, 18, 18)
+        main_layout.setSpacing(18)
 
         left_column = QVBoxLayout()
-        left_column.setSpacing(18)
+        left_column.setSpacing(14)
         main_layout.addLayout(left_column, 3)
 
         top_actions = QHBoxLayout()
@@ -382,18 +384,18 @@ class MainWindow(QMainWindow):
         self.days_container = QWidget()
         self.days_layout = QVBoxLayout(self.days_container)
         self.days_layout.setContentsMargins(0, 0, 0, 0)
-        self.days_layout.setSpacing(18)
+        self.days_layout.setSpacing(14)
         self.days_layout.addStretch(1)
         self.scroll_area.setWidget(self.days_container)
         left_column.addWidget(self.scroll_area, 1)
 
         self.timer_card = QFrame()
         self.timer_card.setObjectName("timerCard")
-        self.timer_card.setMinimumWidth(340)
+        self.timer_card.setMinimumWidth(300)
         self.timer_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         timer_layout = QVBoxLayout(self.timer_card)
-        timer_layout.setContentsMargins(28, 28, 28, 28)
-        timer_layout.setSpacing(18)
+        timer_layout.setContentsMargins(20, 20, 20, 20)
+        timer_layout.setSpacing(12)
 
         current_title = QLabel("Текущая задача")
         current_title.setObjectName("timerHeading")
@@ -404,15 +406,25 @@ class MainWindow(QMainWindow):
         self.active_task_name.setObjectName("activeTaskName")
         timer_layout.addWidget(self.active_task_name)
 
-        self.timer_display = QLabel("00\n00\n00")
-        self.timer_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.timer_display.setObjectName("timerDisplay")
-        timer_layout.addWidget(self.timer_display, 1)
+        time_stack = QVBoxLayout()
+        time_stack.setSpacing(0)
 
-        self.timer_hint = QLabel("часы\nминуты\nсекунды")
-        self.timer_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.timer_hint.setObjectName("timerHint")
-        timer_layout.addWidget(self.timer_hint)
+        self.hours_display = QLabel("00")
+        self.hours_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hours_display.setObjectName("hoursDisplay")
+        time_stack.addWidget(self.hours_display)
+
+        self.minutes_display = QLabel("00")
+        self.minutes_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.minutes_display.setObjectName("minutesDisplay")
+        time_stack.addWidget(self.minutes_display)
+
+        self.seconds_display = QLabel("00")
+        self.seconds_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.seconds_display.setObjectName("secondsDisplay")
+        time_stack.addWidget(self.seconds_display)
+
+        timer_layout.addLayout(time_stack, 1)
 
         self.stop_active_button = QPushButton("Стоп")
         self.stop_active_button.clicked.connect(self._stop_active)
@@ -421,6 +433,48 @@ class MainWindow(QMainWindow):
         self.complete_active_button = QPushButton("Завершить")
         self.complete_active_button.clicked.connect(self._complete_active)
         timer_layout.addWidget(self.complete_active_button)
+
+        focus_card = QFrame()
+        focus_card.setObjectName("focusCard")
+        focus_layout = QVBoxLayout(focus_card)
+        focus_layout.setContentsMargins(14, 14, 14, 14)
+        focus_layout.setSpacing(8)
+
+        focus_title = QLabel("Режим концентрации")
+        focus_title.setObjectName("focusHeading")
+        focus_layout.addWidget(focus_title)
+
+        focus_subtitle = QLabel("Обратный таймер для работы без отвлечений")
+        focus_subtitle.setObjectName("focusSubheading")
+        focus_subtitle.setWordWrap(True)
+        focus_layout.addWidget(focus_subtitle)
+
+        self.focus_display = QLabel("20:00")
+        self.focus_display.setObjectName("focusDisplay")
+        self.focus_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        focus_layout.addWidget(self.focus_display)
+
+        self.focus_status_label = QLabel("Готов к запуску")
+        self.focus_status_label.setObjectName("focusStatusLabel")
+        self.focus_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        focus_layout.addWidget(self.focus_status_label)
+
+        preset_layout = QHBoxLayout()
+        preset_layout.setSpacing(6)
+        self.focus_buttons: dict[int, QPushButton] = {}
+        for minutes in self.focus_presets:
+            button = QPushButton(str(minutes))
+            button.setObjectName("presetButton")
+            button.clicked.connect(lambda _checked=False, value=minutes: self._start_focus_timer(value))
+            self.focus_buttons[minutes] = button
+            preset_layout.addWidget(button)
+        focus_layout.addLayout(preset_layout)
+
+        self.focus_stop_button = QPushButton("Остановить таймер")
+        self.focus_stop_button.clicked.connect(self._stop_focus_timer)
+        focus_layout.addWidget(self.focus_stop_button)
+
+        timer_layout.addWidget(focus_card)
 
         timer_layout.addStretch(1)
         main_layout.addWidget(self.timer_card, 1)
@@ -445,7 +499,6 @@ class MainWindow(QMainWindow):
 
     def _apply_styles(self) -> None:
         self.app.setFont(QFont("Segoe UI", 10))
-        self.timer_display.setFont(QFont("Consolas", 42, QFont.Weight.Bold))
 
         self.setStyleSheet(
             """
@@ -470,14 +523,19 @@ class MainWindow(QMainWindow):
             QFrame#timerCard {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 #121419, stop:0.45 #1c1f27, stop:1 #30333d);
-                border-radius: 40px;
+                border-radius: 34px;
                 border: 1px solid rgba(255, 255, 255, 0.08);
+            }
+            QFrame#focusCard {
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 20px;
             }
             QPushButton {
                 background: #ffffff;
                 border: 1px solid rgba(20, 22, 27, 0.12);
                 border-radius: 12px;
-                padding: 10px 16px;
+                padding: 8px 14px;
                 font-weight: 600;
             }
             QPushButton:hover {
@@ -497,6 +555,18 @@ class MainWindow(QMainWindow):
             QPushButton#ghostButton:hover {
                 background: rgba(21, 25, 35, 0.05);
             }
+            QPushButton#presetButton {
+                min-width: 0;
+                padding: 10px 0;
+                background: rgba(255, 255, 255, 0.08);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.14);
+            }
+            QPushButton#presetButton[active="true"] {
+                background: #f3c96b;
+                color: #19130a;
+                border: none;
+            }
             QLineEdit, QPlainTextEdit, QListWidget, QDateTimeEdit {
                 background: white;
                 border: 1px solid rgba(20, 22, 27, 0.12);
@@ -513,24 +583,53 @@ class MainWindow(QMainWindow):
             QLabel#timerHeading {
                 background: transparent;
                 color: rgba(255, 255, 255, 0.78);
-                font-size: 16px;
+                font-size: 14px;
             }
             QLabel#activeTaskName {
                 background: transparent;
                 color: white;
-                font-size: 24px;
+                font-size: 18px;
                 font-weight: 700;
             }
-            QLabel#timerDisplay {
+            QLabel#hoursDisplay {
                 background: transparent;
-                color: white;
-                line-height: 1.1;
+                color: rgba(255, 255, 255, 0.72);
+                font-size: 34px;
+                font-weight: 700;
+                line-height: 1.0;
+            }
+            QLabel#minutesDisplay {
+                background: transparent;
+                color: #ffffff;
+                font-size: 76px;
+                font-weight: 800;
+                line-height: 0.92;
                 letter-spacing: 1px;
             }
-            QLabel#timerHint {
+            QLabel#secondsDisplay {
                 background: transparent;
-                color: rgba(255, 255, 255, 0.56);
-                text-transform: uppercase;
+                color: rgba(255, 255, 255, 0.72);
+                font-size: 42px;
+                font-weight: 700;
+                line-height: 1.0;
+            }
+            QLabel#focusHeading {
+                background: transparent;
+                color: white;
+                font-size: 16px;
+                font-weight: 700;
+            }
+            QLabel#focusSubheading, QLabel#focusStatusLabel {
+                background: transparent;
+                color: rgba(255, 255, 255, 0.68);
+                font-size: 12px;
+            }
+            QLabel#focusDisplay {
+                background: transparent;
+                color: #f8f7f2;
+                font-size: 32px;
+                font-weight: 800;
+                letter-spacing: 1px;
             }
             """
         )
@@ -556,12 +655,15 @@ class MainWindow(QMainWindow):
             self.days_layout.addWidget(section)
         self.days_layout.addStretch(1)
         self._refresh_active_panel()
+        self._refresh_focus_panel()
 
     def _refresh_active_panel(self) -> None:
         active = self.controller.active_task()
         if not active:
             self.active_task_name.setText("Нет активной задачи")
-            self.timer_display.setText("00\n00\n00")
+            self.hours_display.setText("00")
+            self.minutes_display.setText("00")
+            self.seconds_display.setText("00")
             self.stop_active_button.setEnabled(False)
             self.complete_active_button.setEnabled(False)
             return
@@ -570,9 +672,33 @@ class MainWindow(QMainWindow):
         hours = total // 3600
         minutes = (total % 3600) // 60
         seconds = total % 60
-        self.timer_display.setText(f"{hours:02d}\n{minutes:02d}\n{seconds:02d}")
+        self.hours_display.setText(f"{hours:02d}")
+        self.minutes_display.setText(f"{minutes:02d}")
+        self.seconds_display.setText(f"{seconds:02d}")
         self.stop_active_button.setEnabled(True)
         self.complete_active_button.setEnabled(True)
+
+    def _refresh_focus_panel(self) -> None:
+        focus_state = self.controller.focus_timer_state()
+        selected_minutes = int(focus_state.get("selected_minutes") or 20)
+        remaining_seconds = self.controller.focus_remaining_seconds()
+
+        if remaining_seconds > 0:
+            minutes = remaining_seconds // 60
+            seconds = remaining_seconds % 60
+            self.focus_display.setText(f"{minutes:02d}:{seconds:02d}")
+            self.focus_status_label.setText("Идет фокус-сессия")
+            self.focus_stop_button.setEnabled(True)
+        else:
+            self.focus_display.setText(f"{selected_minutes:02d}:00")
+            self.focus_status_label.setText("Готов к запуску")
+            self.focus_stop_button.setEnabled(False)
+
+        for minutes, button in self.focus_buttons.items():
+            button.setProperty("active", minutes == selected_minutes)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
 
     def _open_create_dialog(self) -> None:
         self.create_dialog.open_clean()
@@ -584,6 +710,20 @@ class MainWindow(QMainWindow):
     def _toggle_open_only(self, checked: bool) -> None:
         self.controller.set_filter_open_only(checked)
         self.refresh_ui()
+
+    def _start_focus_timer(self, minutes: int) -> None:
+        self.controller.start_focus_timer(minutes)
+        self._refresh_focus_panel()
+        self._show_tray_message(
+            "Режим концентрации",
+            f"Запущен таймер на {minutes} мин.",
+            QSystemTrayIcon.MessageIcon.Information,
+            3000,
+        )
+
+    def _stop_focus_timer(self) -> None:
+        self.controller.stop_focus_timer()
+        self._refresh_focus_panel()
 
     def _start_task(self, task_id: str) -> None:
         self.controller.start_task(task_id)
@@ -634,6 +774,8 @@ class MainWindow(QMainWindow):
     def _tick(self) -> None:
         status, task = self.controller.check_reminders()
         self._refresh_active_panel()
+        focus_status, focus_payload = self.controller.check_focus_timer()
+        self._refresh_focus_panel()
         if status == "needs_confirmation" and task:
             self._show_continue_prompt(task)
         elif status == "auto_stopped" and task:
@@ -643,6 +785,22 @@ class MainWindow(QMainWindow):
                 f"{task.title}: подтверждение не было получено в течение 5 минут.",
                 QSystemTrayIcon.MessageIcon.Warning,
                 6000,
+            )
+        if focus_status == "finished":
+            QApplication.beep()
+            QApplication.beep()
+            QApplication.beep()
+            duration_label = f"{focus_payload} мин." if focus_payload else "выбранное время"
+            self._show_tray_message(
+                "Фокус-сессия завершена",
+                f"Таймер концентрации на {duration_label} закончился.",
+                QSystemTrayIcon.MessageIcon.Information,
+                6000,
+            )
+            QMessageBox.information(
+                self,
+                "Фокус-сессия завершена",
+                "Время концентрации вышло.",
             )
 
     def _show_continue_prompt(self, task: Task) -> None:

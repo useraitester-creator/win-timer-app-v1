@@ -19,6 +19,13 @@ class AppController:
         self.ensure_rollover()
         self._rebuild_runtime_state()
 
+    def _focus_timer(self) -> dict[str, object]:
+        focus_timer = self.state.ui.setdefault("focus_timer", {})
+        focus_timer.setdefault("selected_minutes", 20)
+        focus_timer.setdefault("duration_minutes", None)
+        focus_timer.setdefault("ends_at", None)
+        return focus_timer
+
     def save(self) -> None:
         self.storage.save(self.state)
 
@@ -181,6 +188,46 @@ class AppController:
 
     def filter_open_only(self) -> bool:
         return bool(self.state.ui.get("filter_open_only", False))
+
+    def focus_timer_state(self) -> dict[str, object]:
+        return dict(self._focus_timer())
+
+    def start_focus_timer(self, minutes: int) -> None:
+        focus_timer = self._focus_timer()
+        focus_timer["selected_minutes"] = minutes
+        focus_timer["duration_minutes"] = minutes
+        focus_timer["ends_at"] = (datetime.now() + timedelta(minutes=minutes)).isoformat()
+        self.save()
+
+    def stop_focus_timer(self) -> None:
+        focus_timer = self._focus_timer()
+        focus_timer["ends_at"] = None
+        focus_timer["duration_minutes"] = None
+        self.save()
+
+    def focus_remaining_seconds(self) -> int:
+        focus_timer = self._focus_timer()
+        ends_at = focus_timer.get("ends_at")
+        if not ends_at:
+            return 0
+        end_dt = datetime.fromisoformat(str(ends_at))
+        return max(0, int((end_dt - datetime.now()).total_seconds()))
+
+    def check_focus_timer(self) -> tuple[str, int | None]:
+        focus_timer = self._focus_timer()
+        ends_at = focus_timer.get("ends_at")
+        if not ends_at:
+            return ("idle", None)
+        end_dt = datetime.fromisoformat(str(ends_at))
+        if datetime.now() >= end_dt:
+            duration_minutes = focus_timer.get("duration_minutes")
+            focus_timer["ends_at"] = None
+            focus_timer["duration_minutes"] = None
+            self.save()
+            if isinstance(duration_minutes, int):
+                return ("finished", duration_minutes)
+            return ("finished", None)
+        return ("running", self.focus_remaining_seconds())
 
     def check_reminders(self) -> tuple[str, Task | None]:
         now = datetime.now()

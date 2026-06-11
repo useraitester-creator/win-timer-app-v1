@@ -24,6 +24,8 @@ class Bitrix24Error(Exception):
 
 # Smart-process (СПА) "Реестр проектов".
 PROJECTS_ENTITY_TYPE_ID = 150
+# Smart-process (СПА) журнала работ (запись о затраченном времени по проекту).
+WORKLOG_ENTITY_TYPE_ID = 1092
 
 
 def entity_url(webhook_url: str, link: dict | None) -> str | None:
@@ -71,14 +73,53 @@ def _default_factory(webhook_url: str):
     return Bitrix(webhook_url)
 
 
+def _default_post(webhook_url: str, method: str, payload: dict):
+    """Direct JSON POST to a REST method (preserves int/float types).
+
+    fast-bitrix24's call() batches requests, and batch serialization turns
+    values into query-string strings — which methods like task.elapseditem.add
+    (strict about integer types) reject. A JSON body keeps types intact.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = webhook_url.rstrip("/") + "/" + method
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            raise RuntimeError(f"HTTP {exc.code} {exc.reason}") from None
+    if isinstance(body, dict) and body.get("error"):
+        raise RuntimeError(body.get("error_description") or body.get("error"))
+    return body.get("result") if isinstance(body, dict) else body
+
+
 class Bitrix24Client:
-    def __init__(self, webhook_url: str, *, client_factory=None) -> None:
+    def __init__(self, webhook_url: str, *, client_factory=None, post_func=None) -> None:
         url = (webhook_url or "").strip()
         if not looks_like_webhook(url):
             raise Bitrix24Error("Некорректный URL вебхука")
         self._webhook_url = url
         self._factory = client_factory or _default_factory
+        self._post_func = post_func or _default_post
         self._bx = None
+
+    def _post(self, method: str, payload: dict):
+        """Single write request via direct JSON POST, token stripped from errors."""
+        try:
+            return self._post_func(self._webhook_url, method, payload)
+        except Bitrix24Error:
+            raise
+        except Exception as exc:
+            raise Bitrix24Error(self._sanitize(str(exc))) from None
 
     def _client(self):
         if self._bx is None:
@@ -224,6 +265,33 @@ class Bitrix24Client:
         result = self._safe_call("tasks.task.add", {"fields": fields})
         task = result.get("task", result) if isinstance(result, dict) else {}
         return str(task.get("id"))
+
+    def add_project_time(
+        self, project_id, date_iso: str, hours: float, comment: str, responsible_id
+    ) -> str:
+        """Create a worklog item (СПА 1092) for a project. Returns the new item id."""
+        fields = {
+            "parentId150": int(project_id),
+            "assignedById": int(responsible_id),
+            "ufCrm88HoursWork": float(hours),
+            "ufCrm88CommentWork": comment,
+            "ufCrm88DateWork": date_iso,
+        }
+        result = self._post(
+            "crm.item.add", {"entityTypeId": WORKLOG_ENTITY_TYPE_ID, "fields": fields}
+        )
+        item = result.get("item", result) if isinstance(result, dict) else {}
+        return str(item.get("id"))
+
+    def add_task_time(self, task_id, seconds: int, comment: str) -> str:
+        """Log elapsed time on a Bitrix24 task (task.elapseditem.add). Returns record id."""
+        result = self._post(
+            "task.elapseditem.add",
+            {"taskId": int(task_id), "arFields": {"SECONDS": int(seconds), "COMMENT_TEXT": comment}},
+        )
+        if isinstance(result, dict):
+            return str(result.get("id"))
+        return str(result)
 
     def complete_portal_task(self, task_id) -> None:
         """Mark a Bitrix24 task as completed (tasks.task.complete)."""

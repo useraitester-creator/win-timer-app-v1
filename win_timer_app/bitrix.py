@@ -114,6 +114,15 @@ class Bitrix24Client:
         except Exception as exc:
             raise Bitrix24Error(self._sanitize(str(exc))) from None
 
+    def _safe_call(self, method: str, params: dict):
+        """Call a single method with the token stripped from any error."""
+        try:
+            return self._client().call(method, params)
+        except Bitrix24Error:
+            raise
+        except Exception as exc:
+            raise Bitrix24Error(self._sanitize(str(exc))) from None
+
     def _profile(self) -> dict:
         return self._safe_get_all("profile")
 
@@ -186,3 +195,40 @@ class Bitrix24Client:
                     continue
                 found[str(item.get("id"))] = item.get("title", "")
         return [{"id": key, "title": title} for key, title in found.items()]
+
+    def search_companies(self, query: str, limit: int = 30) -> list[dict]:
+        """Search CRM companies by title substring. Empty for queries < 3 chars."""
+        query = (query or "").strip()
+        if len(query) < 3:
+            return []
+        # get_all() rejects 'order'/'start', so we sort client-side.
+        items = self._safe_get_all(
+            "crm.company.list",
+            {"filter": {"%TITLE": query}, "select": ["ID", "TITLE"]},
+        ) or []
+        companies = [{"id": str(c.get("ID")), "title": c.get("TITLE", "")} for c in items]
+        companies.sort(key=lambda c: c["title"].lower())
+        return companies[:limit]
+
+    def create_portal_task(
+        self, title: str, description: str, responsible_id, company_id=None
+    ) -> str:
+        """Create a task in Bitrix24 (tasks.task.add). Returns the new task id."""
+        fields = {
+            "TITLE": title,
+            "RESPONSIBLE_ID": responsible_id,
+            "DESCRIPTION": description or "",
+        }
+        if company_id:
+            fields["UF_CRM_TASK"] = [f"CO_{company_id}"]
+        result = self._safe_call("tasks.task.add", {"fields": fields})
+        task = result.get("task", result) if isinstance(result, dict) else {}
+        return str(task.get("id"))
+
+    def complete_portal_task(self, task_id) -> None:
+        """Mark a Bitrix24 task as completed (tasks.task.complete)."""
+        self._safe_call("tasks.task.complete", {"taskId": task_id})
+
+    def renew_portal_task(self, task_id) -> None:
+        """Re-open a completed Bitrix24 task (tasks.task.renew)."""
+        self._safe_call("tasks.task.renew", {"taskId": task_id})

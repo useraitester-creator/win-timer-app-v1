@@ -64,6 +64,7 @@ class Task:
     completed_at: str | None = None
     continuation_of: str | None = None
     bitrix: dict[str, Any] | None = None
+    planned_days: list[str] = field(default_factory=list)
 
     def total_seconds(self, now: datetime | None = None) -> int:
         return sum(session.duration_seconds(now=now) for session in self.sessions)
@@ -89,6 +90,7 @@ class Task:
             "completed_at": self.completed_at,
             "continuation_of": self.continuation_of,
             "bitrix": self.bitrix,
+            "planned_days": self.planned_days,
         }
 
     @classmethod
@@ -104,4 +106,5 @@ class Task:
             completed_at=data.get("completed_at"),
             continuation_of=data.get("continuation_of"),
             bitrix=data.get("bitrix"),
+            planned_days=list(data.get("planned_days") or []),
         )

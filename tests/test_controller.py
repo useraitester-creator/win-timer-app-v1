@@ -4,7 +4,12 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from win_timer_app.controller import AppController, format_day_label, format_duration
+from win_timer_app.controller import (
+    AppController,
+    format_day_label,
+    format_duration,
+    format_hm,
+)
 from win_timer_app.models import TaskStatus
 from win_timer_app.storage import Storage
 
@@ -18,6 +23,13 @@ def test_format_duration() -> None:
     assert format_duration(59) == "00:00:59"
     assert format_duration(3661) == "01:01:01"
     assert format_duration(36 * 3600) == "36:00:00"
+
+
+def test_format_hm() -> None:
+    assert format_hm(0) == "00:00"
+    assert format_hm(59) == "00:00"
+    assert format_hm(3661) == "01:01"
+    assert format_hm(36 * 3600 + 59) == "36:00"
 
 
 def test_format_day_label() -> None:
@@ -284,45 +296,11 @@ def test_delete_unknown_session_raises(controller: AppController) -> None:
 # Daily rollover
 # ---------------------------------------------------------------------------
 
-def test_rollover_creates_continuation_for_yesterday_open_task(controller: AppController) -> None:
-    task = controller.create_task("Big task")
-    # Pretend the task belongs to a previous day.
-    task.day = "2020-01-01"
-    controller.ensure_rollover()
-
-    today = controller.today_str()
-    continuations = [t for t in controller.state.tasks if t.continuation_of == task.id]
-    assert len(continuations) == 1
-    cont = continuations[0]
-    assert cont.day == today
-    assert cont.title == "Big task (продолжение)"
-    assert cont.status == TaskStatus.OPEN
-
-
-def test_rollover_is_idempotent(controller: AppController) -> None:
-    task = controller.create_task("Big task")
-    task.day = "2020-01-01"
-    controller.ensure_rollover()
-    controller.ensure_rollover()
-    continuations = [t for t in controller.state.tasks if t.continuation_of == task.id]
-    assert len(continuations) == 1
-
-
-def test_rollover_skips_completed_tasks(controller: AppController) -> None:
-    task = controller.create_task("Done task")
-    controller.complete_task(task.id)
-    task.day = "2020-01-01"
-    controller.ensure_rollover()
-    continuations = [t for t in controller.state.tasks if t.continuation_of == task.id]
-    assert continuations == []
-
-
-def test_rollover_closes_cross_midnight_active_session(controller: AppController) -> None:
+def test_plan_rollover_closes_cross_midnight_active_session(controller: AppController) -> None:
     task = controller.create_task("Overnight", start_now=True)
-    # Move the running task (and its open session) to yesterday.
-    task.day = "2020-01-01"
+    # Move the running session to a previous day; rollover should close it.
     task.active_session().started_at = "2020-01-01T23:00:00"
-    controller.ensure_rollover()
+    controller.ensure_plan_rollover()
 
     task = controller.find_task(task.id)
     session = task.sessions[-1]

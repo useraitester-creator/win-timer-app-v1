@@ -183,6 +183,91 @@ def test_list_projects_merges_dedupes_and_excludes_final_stages():
     assert {p["title"] for p in projects} == {"A", "C"}
 
 
+class CallBx:
+    """Fake exposing call() (for create_portal_task)."""
+
+    def __init__(self, result=None, error=None):
+        self.result = result if result is not None else {}
+        self.error = error
+        self.calls = []
+
+    def call(self, method, params=None):
+        self.calls.append((method, params or {}))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def test_search_companies_returns_id_title_after_3_chars():
+    def router(method, params):
+        if method == "crm.company.list":
+            return [{"ID": "10", "TITLE": "ООО Ромашка"}, {"ID": "11", "TITLE": "ООО Берёза"}]
+        return []
+
+    client = _routed(router)
+    assert client.search_companies("ро") == []  # fewer than 3 chars
+    # results come back sorted by title
+    assert client.search_companies("ООО") == [
+        {"id": "11", "title": "ООО Берёза"},
+        {"id": "10", "title": "ООО Ромашка"},
+    ]
+
+
+def test_search_companies_does_not_pass_unsupported_get_all_params():
+    """get_all() rejects 'order'/'start' — search must not send them."""
+    captured = {}
+
+    class Bx:
+        def get_all(self, method, params=None):
+            captured["params"] = params or {}
+            return []
+
+    client = Bitrix24Client("https://acme.bitrix24.ru/rest/1/abc/", client_factory=lambda u: Bx())
+    client.search_companies("ООО")
+    keys = {k.lower() for k in captured["params"]}
+    assert "order" not in keys and "start" not in keys
+
+
+def test_create_portal_task_returns_id_and_binds_company():
+    fake = CallBx(result={"task": {"id": 42}})
+    client = Bitrix24Client("https://acme.bitrix24.ru/rest/1/abc/", client_factory=lambda u: fake)
+    assert client.create_portal_task("T", "D", 1, company_id="10") == "42"
+    method, params = fake.calls[-1]
+    assert method == "tasks.task.add"
+    assert params["fields"]["TITLE"] == "T"
+    assert params["fields"]["RESPONSIBLE_ID"] == 1
+    assert params["fields"]["UF_CRM_TASK"] == ["CO_10"]
+
+
+def test_complete_portal_task_calls_complete():
+    fake = CallBx(result={"task": {"id": 1}})
+    client = Bitrix24Client("https://acme.bitrix24.ru/rest/1/abc/", client_factory=lambda u: fake)
+    client.complete_portal_task("50032")
+    assert fake.calls[-1] == ("tasks.task.complete", {"taskId": "50032"})
+
+
+def test_renew_portal_task_calls_renew():
+    fake = CallBx(result={"task": {"id": 1}})
+    client = Bitrix24Client("https://acme.bitrix24.ru/rest/1/abc/", client_factory=lambda u: fake)
+    client.renew_portal_task("50032")
+    assert fake.calls[-1] == ("tasks.task.renew", {"taskId": "50032"})
+
+
+def test_create_portal_task_without_company_omits_binding():
+    fake = CallBx(result={"task": {"id": 7}})
+    client = Bitrix24Client("https://acme.bitrix24.ru/rest/1/abc/", client_factory=lambda u: fake)
+    assert client.create_portal_task("T", "", 1) == "7"
+    assert "UF_CRM_TASK" not in fake.calls[-1][1]["fields"]
+
+
+def test_link_bitrix_sets_and_persists(storage):
+    controller = AppController(storage)
+    task = controller.create_task("T")
+    controller.link_bitrix(task.id, {"source": "task", "id": "99"})
+    assert controller.find_task(task.id).bitrix == {"source": "task", "id": "99"}
+    assert AppController(storage).find_task(task.id).bitrix == {"source": "task", "id": "99"}
+
+
 def test_entity_url_for_project_points_to_smart_process_item():
     url = entity_url("https://webmens.bitrix24.ru/rest/1/abc/", {"source": "project", "id": "5566"})
     assert url == "https://webmens.bitrix24.ru/crm/type/150/details/5566/"

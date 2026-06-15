@@ -17,7 +17,8 @@ class AppController:
         self.pending_confirmation_task_id: str | None = None
         self.pending_confirmation_deadline: datetime | None = None
         self.next_reminder_at: datetime | None = None
-        self.ensure_rollover()
+        self._migrate()
+        self.ensure_plan_rollover()
         self.state.ui.setdefault("reminder_interval_minutes", 40)
         self._rebuild_runtime_state()
 
@@ -34,52 +35,87 @@ class AppController:
     def today_str(self) -> str:
         return date.today().isoformat()
 
-    def ensure_rollover(self) -> None:
-        today = self.today_str()
+    def _migrate(self) -> None:
+        """One-time migration to the persistent-task + plan model (schema v2)."""
+        if int(self.state.ui.get("schema_version", 1)) >= 2:
+            return
+        self._collapse_continuations()
+        for task in self.state.tasks:
+            if not task.planned_days:
+                task.planned_days = [task.day]
+        self.state.ui["schema_version"] = 2
+        self.state.ui["plan_rollover_day"] = self.today_str()
+        self.save()
+
+    def _collapse_continuations(self) -> None:
+        """Merge old '(продолжение)' chains into their root task, losing no sessions."""
+        by_id = {task.id: task for task in self.state.tasks}
+
+        def root_of(task: Task) -> Task:
+            seen: set[str] = set()
+            while task.continuation_of and task.continuation_of in by_id and task.id not in seen:
+                seen.add(task.id)
+                task = by_id[task.continuation_of]
+            return task
+
+        chains: dict[str, list[Task]] = {}
+        for task in self.state.tasks:
+            chains.setdefault(root_of(task).id, []).append(task)
+
+        survivors: list[Task] = []
+        for root_id, members in chains.items():
+            root = by_id[root_id]
+            members.sort(key=lambda item: item.day)
+            for member in members:
+                if member.id != root.id:
+                    root.sessions.extend(member.sessions)
+            latest = members[-1]
+            root.status = latest.status
+            root.completed_at = latest.completed_at if latest.is_completed() else None
+            root.title = self._strip_continuation_suffix(root.title)
+            root.sessions.sort(key=lambda item: item.started_at)
+            root.planned_days = sorted({m.day for m in members} | set(root.planned_days or []))
+            survivors.append(root)
+        self.state.tasks = survivors
+
+    @staticmethod
+    def _strip_continuation_suffix(title: str) -> str:
+        suffix = " (продолжение)"
+        while title.endswith(suffix):
+            title = title[: -len(suffix)]
+        return title
+
+    def ensure_plan_rollover(self, today: str | None = None) -> None:
+        """Carry yesterday's unfinished plan into today's plan (once per day)."""
+        today = today or self.today_str()
         self._close_cross_day_active_task(today)
-        existing_today = {task.continuation_of for task in self.state.tasks if task.day == today}
-        latest_by_title: dict[str, Task] = {}
-        for task in sorted(self.state.tasks, key=lambda item: (item.day, item.created_at)):
-            latest_by_title[self._base_title(task.title)] = task
-        changed = False
-        for task in list(latest_by_title.values()):
-            if task.day == today or task.is_completed():
+        if self.state.ui.get("plan_rollover_day") == today:
+            return
+        yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+        for task in self.state.tasks:
+            if task.is_completed():
                 continue
-            if task.id in existing_today:
-                continue
-            continuation = Task(
-                id=make_id(),
-                day=today,
-                title=f"{self._base_title(task.title)} (продолжение)",
-                description=task.description,
-                status=TaskStatus.OPEN,
-                continuation_of=task.id,
-            )
-            self.state.tasks.append(continuation)
-            changed = True
-        if changed:
-            self.save()
+            if yesterday in (task.planned_days or []) and today not in task.planned_days:
+                task.planned_days.append(today)
+        self.state.ui["plan_rollover_day"] = today
+        self.save()
 
     def _close_cross_day_active_task(self, today: str) -> None:
         active = self.active_task()
-        if active is None or active.day == today:
+        if active is None:
             return
         session = active.active_session()
         if session is None:
             return
-        previous_day = date.fromisoformat(active.day)
+        if session.start_dt.date().isoformat() == today:
+            return
+        previous_day = session.start_dt.date()
         session.ended_at = datetime.combine(previous_day, time(23, 59, 59)).isoformat()
         active.status = TaskStatus.PAUSED
         self.pending_confirmation_task_id = None
         self.pending_confirmation_deadline = None
         self.next_reminder_at = None
         self.save()
-
-    def _base_title(self, title: str) -> str:
-        suffix = " (продолжение)"
-        if title.endswith(suffix):
-            return title[: -len(suffix)]
-        return title
 
     def _rebuild_runtime_state(self) -> None:
         active = self.active_task()
@@ -114,9 +150,74 @@ class AppController:
         if active and active.active_session():
             self.next_reminder_at = datetime.now() + self._reminder_interval_td()
 
+    def bitrix_webhook(self) -> str:
+        bitrix = self.state.ui.get("bitrix")
+        if not isinstance(bitrix, dict):
+            return ""
+        return str(bitrix.get("webhook_url", "") or "").strip()
+
+    def set_bitrix_webhook(self, url: str) -> None:
+        bitrix = self.state.ui.setdefault("bitrix", {})
+        bitrix["webhook_url"] = (url or "").strip()
+        self.save()
+
     def all_tasks(self) -> list[Task]:
-        self.ensure_rollover()
-        return sorted(self.state.tasks, key=lambda task: (task.day, task.created_at), reverse=True)
+        return sorted(self.state.tasks, key=lambda task: task.created_at, reverse=True)
+
+    def _view_sorted(self, tasks: list[Task]) -> list[Task]:
+        ordered = sorted(tasks, key=lambda task: task.created_at, reverse=True)
+        active = self.active_task()
+        if active is not None and active in ordered:
+            ordered.remove(active)
+            ordered.insert(0, active)
+        return ordered
+
+    def tasks_all(self) -> list[Task]:
+        return self._view_sorted(self.state.tasks)
+
+    def tasks_in_progress(self) -> list[Task]:
+        return self._view_sorted([t for t in self.state.tasks if not t.is_completed()])
+
+    def tasks_today_plan(self, today: str | None = None) -> list[Task]:
+        today = today or self.today_str()
+        return self._view_sorted([t for t in self.state.tasks if today in (t.planned_days or [])])
+
+    def tasks_on_date(self, date_iso: str) -> list[Task]:
+        """Tasks that have tracked time on the given date."""
+        return self._view_sorted(
+            [t for t in self.state.tasks if self.today_seconds(t, date_iso) > 0]
+        )
+
+    def in_today_plan(self, task: Task, today: str | None = None) -> bool:
+        today = today or self.today_str()
+        return today in (task.planned_days or [])
+
+    def add_to_plan(self, task_id: str, today: str | None = None) -> None:
+        today = today or self.today_str()
+        task = self.find_task(task_id)
+        if today not in task.planned_days:
+            task.planned_days.append(today)
+            self.save()
+
+    def remove_from_plan(self, task_id: str, today: str | None = None) -> None:
+        today = today or self.today_str()
+        task = self.find_task(task_id)
+        if today in task.planned_days:
+            task.planned_days = [day for day in task.planned_days if day != today]
+            self.save()
+
+    def today_seconds(self, task: Task, today: str | None = None) -> int:
+        today = today or self.today_str()
+        now = datetime.now()
+        return sum(
+            session.duration_seconds(now=now)
+            for session in task.sessions
+            if session.start_dt.date().isoformat() == today
+        )
+
+    def today_total_seconds(self, today: str | None = None) -> int:
+        today = today or self.today_str()
+        return sum(self.today_seconds(task, today) for task in self.state.tasks)
 
     def tasks_by_day(self, open_only: bool = False) -> list[tuple[str, list[Task]]]:
         grouped: dict[str, list[Task]] = {}
@@ -136,19 +237,73 @@ class AppController:
                 return task
         raise KeyError(task_id)
 
-    def create_task(self, title: str, description: str = "", start_now: bool = False) -> Task:
+    def create_task(
+        self,
+        title: str,
+        description: str = "",
+        start_now: bool = False,
+        bitrix: dict | None = None,
+    ) -> Task:
         task = Task(
             id=make_id(),
             day=self.today_str(),
             title=title.strip(),
             description=description.strip(),
             status=TaskStatus.OPEN,
+            bitrix=bitrix,
+            planned_days=[self.today_str()],
         )
         self.state.tasks.append(task)
         self.save()
         if start_now:
             self.start_task(task.id)
         return task
+
+    def link_bitrix(self, task_id: str, link: dict) -> None:
+        """Attach a Bitrix entity link to a task and persist."""
+        self.find_task(task_id).bitrix = link
+        self.save()
+
+    def mark_sessions_transferred(self, task_id: str, session_ids, record_id) -> None:
+        """Mark given sessions as transferred to Bitrix with the created record id."""
+        ids = set(session_ids)
+        for session in self.find_task(task_id).sessions:
+            if session.id in ids:
+                session.bitrix_record_id = str(record_id)
+        self.save()
+
+    def import_bitrix_items(self, items: list[dict]) -> tuple[int, int]:
+        """Create tasks from imported portal items, skipping same-day duplicates.
+
+        Each item is ``{"source", "id", "title"}``. Returns ``(imported, skipped)``.
+        Re-importing the same item on a later day is allowed (new day's plan).
+        """
+        today = self.today_str()
+        imported = skipped = 0
+        for item in items:
+            source = item.get("source")
+            item_id = str(item.get("id"))
+            if self._bitrix_task_exists(today, source, item_id):
+                skipped += 1
+                continue
+            self.create_task(
+                item.get("title", ""),
+                bitrix={"source": source, "id": item_id},
+            )
+            imported += 1
+        return imported, skipped
+
+    def _bitrix_task_exists(self, day: str, source, item_id: str) -> bool:
+        for task in self.state.tasks:
+            link = task.bitrix
+            if (
+                task.day == day
+                and isinstance(link, dict)
+                and link.get("source") == source
+                and str(link.get("id")) == item_id
+            ):
+                return True
+        return False
 
     def active_task(self) -> Task | None:
         for task in self.state.tasks:
@@ -271,7 +426,7 @@ class AppController:
 
     def check_reminders(self) -> tuple[str, Task | None]:
         now = datetime.now()
-        self.ensure_rollover()
+        self.ensure_plan_rollover()
         active = self.active_task()
         if active is None:
             self.pending_confirmation_task_id = None
@@ -360,6 +515,13 @@ def format_duration(total_seconds: int) -> str:
     minutes = (total_seconds % 3600) // 60
     seconds = total_seconds % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def format_hm(total_seconds: int) -> str:
+    """Format a duration as HH:MM (seconds dropped)."""
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    return f"{hours:02d}:{minutes:02d}"
 
 
 def format_day_label(day_iso: str) -> str:

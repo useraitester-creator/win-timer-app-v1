@@ -23,6 +23,7 @@ class Session:
     id: str
     started_at: str
     ended_at: str | None = None
+    bitrix_record_id: str | None = None  # id записи в Битрикс, если интервал передан
 
     @property
     def start_dt(self) -> datetime:
@@ -41,6 +42,7 @@ class Session:
             "id": self.id,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
+            "bitrix_record_id": self.bitrix_record_id,
         }
 
     @classmethod
@@ -49,6 +51,7 @@ class Session:
             id=data["id"],
             started_at=data["started_at"],
             ended_at=data.get("ended_at"),
+            bitrix_record_id=data.get("bitrix_record_id"),
         )
 
 
@@ -63,6 +66,8 @@ class Task:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     completed_at: str | None = None
     continuation_of: str | None = None
+    bitrix: dict[str, Any] | None = None
+    planned_days: list[str] = field(default_factory=list)
 
     def total_seconds(self, now: datetime | None = None) -> int:
         return sum(session.duration_seconds(now=now) for session in self.sessions)
@@ -87,6 +92,8 @@ class Task:
             "created_at": self.created_at,
             "completed_at": self.completed_at,
             "continuation_of": self.continuation_of,
+            "bitrix": self.bitrix,
+            "planned_days": self.planned_days,
         }
 
     @classmethod
@@ -101,4 +108,6 @@ class Task:
             created_at=data.get("created_at", datetime.now().isoformat()),
             completed_at=data.get("completed_at"),
             continuation_of=data.get("continuation_of"),
+            bitrix=data.get("bitrix"),
+            planned_days=list(data.get("planned_days") or []),
         )

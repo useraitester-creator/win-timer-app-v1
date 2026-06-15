@@ -13,11 +13,18 @@ from PySide6.QtCore import (
     QUrl,
     Signal,
 )
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QFont, QIcon
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QFontDatabase,
+    QIcon,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
-    QButtonGroup,
     QCheckBox,
     QCompleter,
     QDateEdit,
@@ -26,6 +33,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -42,6 +50,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QStyle,
     QSystemTrayIcon,
     QTabWidget,
@@ -705,7 +714,17 @@ class SessionEditDialog(QDialog):
         QMessageBox.warning(self, "Битрикс24", f"Не удалось передать время: {message}")
 
 
+_STATUS_PROP = {
+    TaskStatus.RUNNING: "running",
+    TaskStatus.PAUSED: "paused",
+    TaskStatus.COMPLETED: "done",
+    TaskStatus.OPEN: "todo",
+}
+
+
 class TaskRow(QFrame):
+    """Compact single-line task row (Bitrix24 style, 48px tall)."""
+
     start_requested = Signal(str)
     stop_requested = Signal(str)
     complete_requested = Signal(str)
@@ -719,100 +738,146 @@ class TaskRow(QFrame):
     ) -> None:
         super().__init__()
         self.setObjectName("taskRow")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        self.setFixedHeight(48)
+        self._title = task.title
+        self._is_running = task.status == TaskStatus.RUNNING
+        status = _STATUS_PROP.get(task.status, "todo")
+        self.setProperty("status", status)
 
-        top = QHBoxLayout()
-        top.setSpacing(12)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(13, 0, 12, 0)
+        layout.setSpacing(10)
 
-        title_block = QVBoxLayout()
-        title_block.setSpacing(2)
+        dot = QFrame()
+        dot.setObjectName("taskDot")
+        dot.setProperty("status", status)
+        dot.setFixedSize(8, 8)
+        layout.addWidget(dot)
 
-        title_label = QLabel(task.title)
-        title_font = title_label.font()
-        base_size = title_font.pointSize()
-        title_font.setPointSize((base_size if base_size > 0 else 10) + 2)
-        title_font.setBold(True)
-        if task.status == TaskStatus.COMPLETED:
-            title_font.setStrikeOut(True)
-        title_label.setFont(title_font)
-        title_block.addWidget(title_label)
+        self._name_label = QLabel(task.title)
+        self._name_label.setObjectName("taskName")
+        self._name_label.setToolTip(task.title)
+        self._name_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        layout.addWidget(self._name_label, 1)
 
-        if task.description:
-            description_label = QLabel(task.description)
-            description_label.setObjectName("descriptionLabel")
-            description_label.setWordWrap(True)
-            title_block.addWidget(description_label)
-
-        top.addLayout(title_block, 1)
-
+        # ── inline time block: «сег.» / «всего» ──────────────
         reference = reference_date or controller.today_str()
-        period_label = (
-            "Сегодня" if reference == controller.today_str() else format_day_label(reference)
-        )
-        time_label = QLabel(
-            f"{period_label}: {format_hm(controller.today_seconds(task, reference))} · "
-            f"Всего: {format_hm(task.total_seconds(datetime.now()))}"
-        )
-        time_label.setObjectName("timeLabel")
-        top.addWidget(time_label)
+        is_today = reference == controller.today_str()
+        times = QHBoxLayout()
+        times.setSpacing(4)
+        today_label = QLabel("сег." if is_today else format_day_label(reference))
+        today_label.setObjectName("rowTimeLbl")
+        times.addWidget(today_label)
+        today_value = QLabel(format_hm(controller.today_seconds(task, reference)))
+        today_value.setObjectName("rowTimeVal")
+        today_value.setProperty("live", self._is_running)
+        times.addWidget(today_value)
+        sep = QLabel("·")
+        sep.setObjectName("rowTimeSep")
+        times.addWidget(sep)
+        total_label = QLabel("всего")
+        total_label.setObjectName("rowTimeLbl")
+        times.addWidget(total_label)
+        total_value = QLabel(format_hm(task.total_seconds(datetime.now())))
+        total_value.setObjectName("rowTimeVal")
+        times.addWidget(total_value)
+        layout.addLayout(times)
 
-        history_button = QPushButton("История")
-        history_button.setObjectName("ghostButton")
-        history_button.clicked.connect(lambda: self.history_requested.emit(task.id))
-        top.addWidget(history_button)
+        # ── actions (revealed on hover; always on for running) ─
+        self._actions = QWidget()
+        self._actions.setObjectName("rowActions")
+        actions = QHBoxLayout(self._actions)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(4)
 
-        delete_button = QPushButton()
-        delete_button.setObjectName("deleteGhostButton")
-        delete_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
-        delete_button.setToolTip("Удалить задачу")
-        delete_button.clicked.connect(lambda: self.delete_requested.emit(task.id))
-        top.addWidget(delete_button)
-        layout.addLayout(top)
+        is_done = task.status == TaskStatus.COMPLETED
 
-        controls = QHBoxLayout()
-        controls.setSpacing(8)
+        if not is_done:
+            history_button = QPushButton("↺")
+            history_button.setObjectName("iconAction")
+            history_button.setFixedSize(26, 26)
+            history_button.setToolTip("История сессий")
+            history_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            history_button.clicked.connect(lambda: self.history_requested.emit(task.id))
+            actions.addWidget(history_button)
 
-        if task.status == TaskStatus.COMPLETED:
-            resume_button = QPushButton("Возобновить")
-            resume_button.setObjectName("resumeButton")
-            resume_button.clicked.connect(lambda: self.resume_requested.emit(task.id))
-            controls.addWidget(resume_button)
-        else:
-            start_text = "Стоп" if task.status == TaskStatus.RUNNING else "Старт"
-            start_button = QPushButton(start_text)
-            start_button.setObjectName("stopButton" if task.status == TaskStatus.RUNNING else "startButton")
-            if task.status == TaskStatus.RUNNING:
-                start_button.clicked.connect(lambda: self.stop_requested.emit(task.id))
-            else:
-                start_button.clicked.connect(lambda: self.start_requested.emit(task.id))
-            controls.addWidget(start_button)
+            portal_url = entity_url(controller.bitrix_webhook(), task.bitrix)
+            if portal_url:
+                open_button = QPushButton("Открыть в Б24")
+                open_button.setObjectName("linkAction")
+                open_button.setToolTip("Открыть сущность в Битрикс24")
+                open_button.setCursor(Qt.CursorShape.PointingHandCursor)
+                open_button.clicked.connect(
+                    lambda checked=False, url=portal_url: QDesktopServices.openUrl(QUrl(url))
+                )
+                actions.addWidget(open_button)
 
             complete_button = QPushButton("Завершить")
-            complete_button.setObjectName("completeButton")
+            complete_button.setObjectName("linkAction")
+            complete_button.setCursor(Qt.CursorShape.PointingHandCursor)
             complete_button.clicked.connect(lambda: self.complete_requested.emit(task.id))
-            controls.addWidget(complete_button)
+            actions.addWidget(complete_button)
 
         in_plan = controller.in_today_plan(task)
-        plan_button = QPushButton("Убрать из плана" if in_plan else "В план")
-        plan_button.setObjectName("ghostButton")
+        plan_button = QPushButton("Из плана" if in_plan else "В план")
+        plan_button.setObjectName("linkAction")
+        plan_button.setCursor(Qt.CursorShape.PointingHandCursor)
         plan_button.clicked.connect(lambda: self.plan_toggle_requested.emit(task.id))
-        controls.addWidget(plan_button)
+        actions.addWidget(plan_button)
 
-        controls.addStretch(1)
+        delete_button = QPushButton()
+        delete_button.setObjectName("iconActionDanger")
+        delete_button.setFixedSize(26, 26)
+        delete_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
+        delete_button.setToolTip("Удалить задачу")
+        delete_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_button.clicked.connect(lambda: self.delete_requested.emit(task.id))
+        actions.addWidget(delete_button)
 
-        portal_url = entity_url(controller.bitrix_webhook(), task.bitrix)
-        if portal_url:
-            open_button = QPushButton("Открыть в Б24")
-            open_button.setObjectName("ghostButton")
-            open_button.setToolTip("Открыть сущность в Битрикс24")
-            open_button.clicked.connect(
-                lambda checked=False, url=portal_url: QDesktopServices.openUrl(QUrl(url))
-            )
-            controls.addWidget(open_button)
+        if is_done:
+            resume_button = QPushButton("▶ Возобновить")
+            resume_button.setObjectName("rowResume")
+            resume_button.setFixedHeight(26)
+            resume_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            resume_button.clicked.connect(lambda: self.resume_requested.emit(task.id))
+            actions.addWidget(resume_button)
+        elif self._is_running:
+            stop_button = QPushButton("⏸ Стоп")
+            stop_button.setObjectName("rowStop")
+            stop_button.setFixedHeight(26)
+            stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            stop_button.clicked.connect(lambda: self.stop_requested.emit(task.id))
+            actions.addWidget(stop_button)
+        else:
+            start_button = QPushButton("▶ Старт")
+            start_button.setObjectName("rowStart")
+            start_button.setFixedHeight(26)
+            start_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            start_button.clicked.connect(lambda: self.start_requested.emit(task.id))
+            actions.addWidget(start_button)
 
-        layout.addLayout(controls)
+        layout.addWidget(self._actions)
+
+        # Running rows keep their actions visible; the rest reveal on hover.
+        self._actions.setVisible(self._is_running)
+
+    def enterEvent(self, event) -> None:
+        self._actions.setVisible(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if not self._is_running:
+            self._actions.setVisible(False)
+        super().leaveEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        width = self._name_label.width()
+        if width <= 0:
+            return
+        metrics = self._name_label.fontMetrics()
+        elided = metrics.elidedText(self._title, Qt.TextElideMode.ElideRight, width)
+        self._name_label.setText(elided)
 
 
 class FloatingTimer(QWidget):
@@ -821,6 +886,7 @@ class FloatingTimer(QWidget):
     stop_requested = Signal()
     start_requested = Signal()
     restore_requested = Signal()
+    close_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -844,9 +910,22 @@ class FloatingTimer(QWidget):
         layout.setContentsMargins(14, 10, 14, 12)
         layout.setSpacing(6)
 
+        header = QHBoxLayout()
+        header.setSpacing(8)
+
         self.name_label = QLabel("Задача")
         self.name_label.setObjectName("floatingName")
-        layout.addWidget(self.name_label)
+        header.addWidget(self.name_label, 1)
+
+        self.close_button = QPushButton("✕")
+        self.close_button.setObjectName("floatingClose")
+        self.close_button.setFixedSize(20, 20)
+        self.close_button.setToolTip("Скрыть виджет (таймер продолжит работать)")
+        self.close_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_button.clicked.connect(self.close_requested.emit)
+        header.addWidget(self.close_button, 0, Qt.AlignmentFlag.AlignTop)
+
+        layout.addLayout(header)
 
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
@@ -911,12 +990,25 @@ class FloatingTimer(QWidget):
                 color: rgba(255, 255, 255, 0.32);
                 background: rgba(255, 255, 255, 0.05);
             }
+            QPushButton#floatingClose {
+                background: transparent;
+                color: rgba(255, 255, 255, 0.55);
+                border: none;
+                border-radius: 6px;
+                padding: 0;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            QPushButton#floatingClose:hover {
+                background: rgba(255, 90, 90, 0.85);
+                color: white;
+            }
             """
         )
 
     def update_view(self, title: str, elapsed: str, running: bool) -> None:
         elided = self.name_label.fontMetrics().elidedText(
-            title, Qt.TextElideMode.ElideRight, 196
+            title, Qt.TextElideMode.ElideRight, 168
         )
         self.name_label.setText(elided)
         self.time_label.setText(elapsed)
@@ -1147,8 +1239,9 @@ class MainWindow(QMainWindow):
         self.floating.stop_requested.connect(self._floating_stop)
         self.floating.start_requested.connect(self._floating_start)
         self.floating.restore_requested.connect(self._restore_from_tray)
+        self.floating.close_requested.connect(self._floating_close)
+        self._load_fonts()
         self._build_ui()
-        self._build_menu_bar()
         self._build_tray()
         self._apply_styles()
         self.refresh_ui()
@@ -1158,82 +1251,121 @@ class MainWindow(QMainWindow):
         self.clock_timer.timeout.connect(self._tick)
         self.clock_timer.start()
 
+    def _load_fonts(self) -> None:
+        """Register bundled fonts (if any) and resolve Inter / Roboto Mono."""
+        import os
+
+        fonts_dir = os.path.join(os.path.dirname(__file__), "assets", "fonts")
+        if os.path.isdir(fonts_dir):
+            for name in os.listdir(fonts_dir):
+                if name.lower().endswith((".ttf", ".otf")):
+                    QFontDatabase.addApplicationFont(os.path.join(fonts_dir, name))
+
+        families = set(QFontDatabase.families())
+
+        def pick(*candidates: str) -> str:
+            for family in candidates:
+                if family in families:
+                    return family
+            return candidates[-1]
+
+        self._sans_family = pick("Inter", "Segoe UI", "Helvetica Neue", "Arial")
+        self._mono_family = pick("Roboto Mono", "Consolas", "Cascadia Mono", "Courier New")
+        app_font = QFont(self._sans_family, 10)
+        app_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+        self.app.setFont(app_font)
+
     def _build_ui(self) -> None:
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("mainTabs")
-        self.setCentralWidget(self.tabs)
-        self.tabs.addTab(self._build_tasks_tab(), "Задачи")
-        self.tabs.addTab(self._build_focus_tab(), "Фокус")
-        self.tabs.setCornerWidget(
-            self._build_settings_button(), Qt.Corner.TopRightCorner
-        )
+        central = QWidget()
+        central.setObjectName("rootArea")
+        root_layout = QHBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+        root_layout.addWidget(self._build_sidebar())
 
-    def _build_settings_button(self) -> QWidget:
-        button = QPushButton("⚙")
-        button.setObjectName("settingsButton")
-        button.setToolTip("Настройки")
-        button.setCursor(Qt.CursorShape.PointingHandCursor)
-        button.setFixedSize(34, 34)
-        button.clicked.connect(self._open_settings)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._build_tasks_page())  # index 0 — Задачи
+        self.pages.addWidget(self._build_focus_page())  # index 1 — Фокус
+        root_layout.addWidget(self.pages, 1)
 
-        container = QWidget()
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 14, 0)
-        layout.addWidget(button)
-        return container
+        self.setCentralWidget(central)
+        self._set_page(0)
 
-    def _build_tasks_tab(self) -> QWidget:
-        root = QWidget()
+    def _build_sidebar(self) -> QWidget:
+        bar = QFrame()
+        bar.setObjectName("sidebar")
+        bar.setFixedWidth(52)
+        layout = QVBoxLayout(bar)
+        layout.setContentsMargins(0, 16, 0, 16)
+        layout.setSpacing(2)
 
-        main_layout = QHBoxLayout(root)
-        main_layout.setContentsMargins(18, 18, 18, 18)
-        main_layout.setSpacing(18)
+        logo = QLabel("⏱")
+        logo.setObjectName("sidebarLogo")
+        logo.setFixedSize(32, 32)
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(logo, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(12)
 
-        left_column = QVBoxLayout()
-        left_column.setSpacing(14)
-        main_layout.addLayout(left_column, 3)
+        self._nav_buttons: dict[int, QPushButton] = {}
+        for index, (glyph, tip) in enumerate((("≣", "Задачи"), ("◎", "Фокус"))):
+            button = QPushButton(glyph)
+            button.setObjectName("navButton")
+            button.setFixedSize(38, 38)
+            button.setToolTip(tip)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _checked=False, i=index: self._set_page(i))
+            self._nav_buttons[index] = button
+            layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        top_actions = QHBoxLayout()
-        top_actions.setSpacing(12)
+        layout.addStretch(1)
 
-        section_title = QLabel("Задачи")
-        section_title.setObjectName("sectionTitle")
-        top_actions.addWidget(section_title)
-        top_actions.addStretch(1)
+        settings_button = QPushButton("⚙")
+        settings_button.setObjectName("navButton")
+        settings_button.setFixedSize(38, 38)
+        settings_button.setToolTip("Настройки")
+        settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_button.clicked.connect(self._open_settings)
+        layout.addWidget(settings_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        portal_button = QPushButton("Выбрать с портала")
-        portal_button.clicked.connect(self._open_portal_import)
-        top_actions.addWidget(portal_button)
+        return bar
 
-        add_button = QPushButton("Новая задача")
-        add_button.setObjectName("primaryButton")
-        add_button.clicked.connect(self._open_create_dialog)
-        top_actions.addWidget(add_button)
-        left_column.addLayout(top_actions)
+    def _set_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        for i, button in self._nav_buttons.items():
+            button.setProperty("active", i == index)
+            button.style().unpolish(button)
+            button.style().polish(button)
 
-        view_row = QHBoxLayout()
-        view_row.setSpacing(6)
-        self.view_group = QButtonGroup(self)
-        self.view_group.setExclusive(False)  # refresh_ui controls highlight (date mode = none)
+    def _build_tasks_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("tasksPage")
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        # ── Subbar: filter chips, date, portal, new task ───────
+        subbar = QFrame()
+        subbar.setObjectName("subbar")
+        subbar.setFixedHeight(48)
+        sub = QHBoxLayout(subbar)
+        sub.setContentsMargins(20, 0, 20, 0)
+        sub.setSpacing(6)
+
         self._view_buttons: dict[str, QPushButton] = {}
-        for key, label in (
-            ("plan", "План на сегодня"),
-            ("in_progress", "В работе"),
-            ("all", "Все задачи"),
-        ):
-            button = QPushButton(label)
-            button.setObjectName("segmentButton")
-            button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, view=key: self._set_view(view))
-            self.view_group.addButton(button)
-            self._view_buttons[key] = button
-            view_row.addWidget(button)
+        for key, label in (("plan", "Сегодня"), ("in_progress", "В работе"), ("all", "Все")):
+            chip = QPushButton(label)
+            chip.setObjectName("filterChip")
+            chip.setFixedHeight(28)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.clicked.connect(lambda _checked=False, view=key: self._set_view(view))
+            self._view_buttons[key] = chip
+            sub.addWidget(chip)
 
         self.date_edit = QDateEdit()
         self.date_edit.setObjectName("dateFilter")
         self.date_edit.setCalendarPopup(True)
         self.date_edit.setDisplayFormat("dd.MM.yyyy")
-        self.date_edit.setFixedWidth(140)
+        self.date_edit.setFixedWidth(124)
         self.date_edit.setToolTip("Показать задачи с затраченным временем за выбранный день")
         _style_calendar_field(self.date_edit)
         self.date_edit.blockSignals(True)
@@ -1241,76 +1373,134 @@ class MainWindow(QMainWindow):
         self.date_edit.blockSignals(False)
         self.date_edit.dateChanged.connect(self._set_date)
         self.date_edit.calendarWidget().clicked.connect(self._set_date)
-        view_row.addWidget(self.date_edit)
+        sub.addWidget(self.date_edit)
 
-        view_row.addStretch(1)
+        sub.addStretch(1)
+
         self.today_total_label = QLabel("")
         self.today_total_label.setObjectName("summaryLabel")
-        view_row.addWidget(self.today_total_label)
-        left_column.addLayout(view_row)
+        sub.addWidget(self.today_total_label)
+
+        portal_button = QPushButton("С портала")
+        portal_button.setObjectName("ghostButton")
+        portal_button.setFixedHeight(28)
+        portal_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        portal_button.clicked.connect(self._open_portal_import)
+        sub.addWidget(portal_button)
+
+        add_button = QPushButton("＋ Новая задача")
+        add_button.setObjectName("btnAccent")
+        add_button.setFixedHeight(30)
+        add_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_button.clicked.connect(self._open_create_dialog)
+        sub.addWidget(add_button)
+
+        page_layout.addWidget(subbar)
+
+        # ── Content row: task list + dark timer panel ──────────
+        content = QWidget()
+        content_layout = QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
 
         self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("taskScroll")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.days_container = QWidget()
+        self.days_container.setObjectName("taskListBg")
         self.days_layout = QVBoxLayout(self.days_container)
-        self.days_layout.setContentsMargins(0, 0, 0, 0)
-        self.days_layout.setSpacing(14)
+        self.days_layout.setContentsMargins(20, 12, 20, 16)
+        self.days_layout.setSpacing(6)
         self.days_layout.addStretch(1)
         self.scroll_area.setWidget(self.days_container)
-        left_column.addWidget(self.scroll_area, 1)
+        content_layout.addWidget(self.scroll_area, 1)
+
+        content_layout.addWidget(self._build_timer_panel())
+        page_layout.addWidget(content, 1)
+        return page
+
+    def _build_timer_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("timerPanel")
+        panel.setFixedWidth(268)
+        self.timer_panel = panel
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(18, 20, 18, 20)
+        layout.setSpacing(0)
+
+        timer_label = QLabel("ТАЙМЕР")
+        timer_label.setObjectName("timerLbl")
+        layout.addWidget(timer_label)
+        layout.addSpacing(12)
 
         self.timer_card = QFrame()
         self.timer_card.setObjectName("timerCard")
-        self.timer_card.setMinimumWidth(300)
-        self.timer_card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
-        timer_layout = QVBoxLayout(self.timer_card)
-        timer_layout.setContentsMargins(20, 20, 20, 20)
-        timer_layout.setSpacing(12)
+        card = QVBoxLayout(self.timer_card)
+        card.setContentsMargins(14, 14, 14, 14)
+        card.setSpacing(0)
 
-        current_title = QLabel("Текущая задача")
-        current_title.setObjectName("timerHeading")
-        timer_layout.addWidget(current_title)
-
-        self.active_task_name = QLabel("Нет активной задачи")
+        self.active_task_name = QLabel("Выберите задачу\nи нажмите Старт")
+        self.active_task_name.setObjectName("tcardName")
         self.active_task_name.setWordWrap(True)
-        self.active_task_name.setObjectName("activeTaskName")
-        timer_layout.addWidget(self.active_task_name)
+        card.addWidget(self.active_task_name)
+        card.addSpacing(14)
 
-        time_stack = QVBoxLayout()
-        time_stack.setSpacing(0)
+        self.timer_digits = QLabel("00:00:00")
+        self.timer_digits.setObjectName("timerDigits")
+        card.addWidget(self.timer_digits)
+        card.addSpacing(10)
 
-        self.hours_display = QLabel("00")
-        self.hours_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hours_display.setObjectName("hoursDisplay")
-        time_stack.addWidget(self.hours_display)
+        sub = QHBoxLayout()
+        sub.setSpacing(16)
+        for caption, attr in (("СЕГОДНЯ", "timer_today_value"), ("ВСЕГО", "timer_total_value")):
+            box = QVBoxLayout()
+            box.setSpacing(1)
+            cap = QLabel(caption)
+            cap.setObjectName("tcsLbl")
+            box.addWidget(cap)
+            value = QLabel("0:00")
+            value.setObjectName("tcsVal")
+            setattr(self, attr, value)
+            box.addWidget(value)
+            sub.addLayout(box)
+        sub.addStretch(1)
+        card.addLayout(sub)
 
-        self.minutes_display = QLabel("00")
-        self.minutes_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.minutes_display.setObjectName("minutesDisplay")
-        time_stack.addWidget(self.minutes_display)
+        layout.addWidget(self.timer_card)
+        layout.addSpacing(16)
 
-        self.seconds_display = QLabel("00")
-        self.seconds_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.seconds_display.setObjectName("secondsDisplay")
-        time_stack.addWidget(self.seconds_display)
+        self.timer_progress = QProgressBar()
+        self.timer_progress.setObjectName("timerProgress")
+        self.timer_progress.setTextVisible(False)
+        self.timer_progress.setFixedHeight(3)
+        self.timer_progress.setRange(0, 100)
+        self.timer_progress.setValue(0)
+        layout.addWidget(self.timer_progress)
 
-        timer_layout.addLayout(time_stack, 1)
+        layout.addStretch(1)
 
         self.stop_active_button = QPushButton("Стоп")
+        self.stop_active_button.setObjectName("btnStop")
+        self.stop_active_button.setFixedHeight(38)
+        self.stop_active_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.stop_active_button.clicked.connect(self._stop_active)
-        timer_layout.addWidget(self.stop_active_button)
+        layout.addWidget(self.stop_active_button)
+        layout.addSpacing(6)
 
-        self.complete_active_button = QPushButton("Завершить")
+        self.complete_active_button = QPushButton("Завершить задачу")
+        self.complete_active_button.setObjectName("btnComplete")
+        self.complete_active_button.setFixedHeight(38)
+        self.complete_active_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.complete_active_button.clicked.connect(self._complete_active)
-        timer_layout.addWidget(self.complete_active_button)
+        layout.addWidget(self.complete_active_button)
 
-        timer_layout.addStretch(1)
-        main_layout.addWidget(self.timer_card, 1)
-        return root
+        return panel
 
-    def _build_focus_tab(self) -> QWidget:
+    def _build_focus_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("focusPage")
         outer = QVBoxLayout(page)
         outer.setContentsMargins(40, 30, 40, 30)
         outer.setSpacing(0)
@@ -1320,21 +1510,17 @@ class MainWindow(QMainWindow):
         row.addStretch(1)
 
         focus_card = QFrame()
-        focus_card.setObjectName("focusTabCard")
+        focus_card.setObjectName("focusCard")
         focus_card.setMinimumWidth(380)
-        focus_card.setMaximumWidth(560)
+        focus_card.setMaximumWidth(520)
         focus_layout = QVBoxLayout(focus_card)
-        focus_layout.setContentsMargins(28, 26, 28, 26)
-        focus_layout.setSpacing(12)
+        focus_layout.setContentsMargins(40, 36, 40, 36)
+        focus_layout.setSpacing(22)
 
-        focus_title = QLabel("Режим концентрации")
+        focus_title = QLabel("РЕЖИМ КОНЦЕНТРАЦИИ")
         focus_title.setObjectName("focusHeading")
+        focus_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         focus_layout.addWidget(focus_title)
-
-        focus_subtitle = QLabel("Обратный таймер для работы без отвлечений")
-        focus_subtitle.setObjectName("focusSubheading")
-        focus_subtitle.setWordWrap(True)
-        focus_layout.addWidget(focus_subtitle)
 
         self.focus_display = QLabel("20:00")
         self.focus_display.setObjectName("focusDisplay")
@@ -1347,17 +1533,22 @@ class MainWindow(QMainWindow):
         focus_layout.addWidget(self.focus_status_label)
 
         preset_layout = QHBoxLayout()
-        preset_layout.setSpacing(6)
+        preset_layout.setSpacing(5)
+        preset_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.focus_buttons: dict[int, QPushButton] = {}
         for minutes in self.focus_presets:
-            button = QPushButton(str(minutes))
-            button.setObjectName("presetButton")
+            button = QPushButton(f"{minutes} мин")
+            button.setObjectName("focusDur")
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(lambda _checked=False, value=minutes: self._start_focus_timer(value))
             self.focus_buttons[minutes] = button
             preset_layout.addWidget(button)
         focus_layout.addLayout(preset_layout)
 
         self.focus_stop_button = QPushButton("Остановить таймер")
+        self.focus_stop_button.setObjectName("focusGo")
+        self.focus_stop_button.setFixedHeight(40)
+        self.focus_stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.focus_stop_button.clicked.connect(self._stop_focus_timer)
         focus_layout.addWidget(self.focus_stop_button)
 
@@ -1366,12 +1557,6 @@ class MainWindow(QMainWindow):
         outer.addLayout(row)
         outer.addStretch(1)
         return page
-
-    def _build_menu_bar(self) -> None:
-        settings_action = QAction("Параметры…", self)
-        settings_action.triggered.connect(self._open_settings)
-        menu = self.menuBar().addMenu("Настройки")
-        menu.addAction(settings_action)
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self.app_icon, self)
@@ -1382,6 +1567,10 @@ class MainWindow(QMainWindow):
         show_action = QAction("Открыть", self)
         show_action.triggered.connect(self._restore_from_tray)
         tray_menu.addAction(show_action)
+
+        show_widget_action = QAction("Показать виджет", self)
+        show_widget_action.triggered.connect(self._show_floating)
+        tray_menu.addAction(show_widget_action)
 
         settings_action = QAction("Настройки…", self)
         settings_action.triggered.connect(self._open_settings)
@@ -1398,236 +1587,229 @@ class MainWindow(QMainWindow):
         self.tray.show()
 
     def _apply_styles(self) -> None:
-        self.app.setFont(QFont("Segoe UI", 10))
+        qss = """
+            /* ── Base ─────────────────────────────────────── */
+            QWidget { background: #F2F3F7; color: #252835; font-family: "__SANS__"; }
+            QMainWindow, QWidget#rootArea, QWidget#tasksPage, QWidget#focusPage { background: #F2F3F7; }
+            QLabel { background: transparent; }
+            QToolTip {
+                background: #252835; color: #FFFFFF; border: none;
+                padding: 4px 8px; border-radius: 6px;
+            }
 
-        self.setStyleSheet(
-            """
-            QWidget {
-                background: #f3f4f6;
-                color: #14161b;
+            /* ── Generic inputs (dialogs) ─────────────────── */
+            QLineEdit, QPlainTextEdit, QListWidget, QDateTimeEdit, QSpinBox {
+                background: #F5F6FA; border: 1px solid #D0D2D8; border-radius: 10px;
+                padding: 8px 12px; color: #252835; selection-background-color: #3B83F6;
             }
-            QLabel {
-                background: transparent;
+            QLineEdit:focus, QPlainTextEdit:focus, QListWidget:focus,
+            QDateTimeEdit:focus, QSpinBox:focus { border-color: #3B83F6; background: #FFFFFF; }
+
+            /* ── Generic buttons (dialogs / fallback) ─────── */
+            QPushButton {
+                background: #F5F6FA; border: 1px solid #D0D2D8; border-radius: 8px;
+                padding: 7px 14px; color: #252835; font-weight: 400;
             }
-            QMainWindow {
-                background: #eef1f4;
+            QPushButton:hover { background: #ECEEF3; }
+            QPushButton:disabled { color: #B8BDC9; }
+            QPushButton#primaryButton, QPushButton#btnAccent {
+                background: #3B83F6; border: none; color: #FFFFFF; font-weight: 500;
+                padding: 0 16px;
             }
-            QFrame#createCard, QFrame#dayCard {
-                background: rgba(255, 255, 255, 0.92);
-                border: 1px solid rgba(20, 22, 27, 0.08);
-                border-radius: 26px;
+            QPushButton#primaryButton:hover, QPushButton#btnAccent:hover { background: #2563EB; }
+            QPushButton#ghostButton {
+                background: transparent; border: 1px solid #D0D2D8; border-radius: 8px;
+                color: #828B9A; padding: 0 14px; font-weight: 400;
             }
+            QPushButton#ghostButton:hover { background: #F5F6FA; color: #252835; }
+            QPushButton#deleteGhostButton {
+                background: transparent; border: none; border-radius: 7px;
+                padding: 4px 6px; color: #828B9A;
+            }
+            QPushButton#deleteGhostButton:hover { background: #FDE8E8; color: #E05353; }
+
+            /* ── Sidebar ──────────────────────────────────── */
+            QFrame#sidebar { background: #FFFFFF; border-right: 1px solid #DCDEE3; }
+            QLabel#sidebarLogo {
+                background: #3B83F6; color: #FFFFFF; border-radius: 10px;
+                font-size: 17px; font-weight: 600;
+            }
+            QPushButton#navButton {
+                background: transparent; border: none; border-radius: 10px;
+                color: #B8BDC9; font-size: 18px; padding: 0;
+            }
+            QPushButton#navButton:hover { background: #F5F6FA; color: #828B9A; }
+            QPushButton#navButton[active="true"] { background: #E8F0FD; color: #3B83F6; }
+
+            /* ── Subbar ───────────────────────────────────── */
+            QFrame#subbar { background: #FFFFFF; border-bottom: 1px solid #DCDEE3; }
+            QPushButton#filterChip {
+                background: #F5F6FA; border: 1px solid transparent; border-radius: 8px;
+                color: #828B9A; padding: 0 13px; font-size: 12px; font-weight: 400;
+            }
+            QPushButton#filterChip:hover { background: #FFFFFF; color: #828B9A; }
+            QPushButton#filterChip[active="true"] {
+                background: #FFFFFF; border: 1px solid #D0D2D8; color: #3B83F6; font-weight: 500;
+            }
+            QLabel#summaryLabel { color: #B8BDC9; font-size: 11px; }
+
+            /* ── Task list ────────────────────────────────── */
+            QScrollArea#taskScroll { background: #F2F3F7; border: none; }
+            QWidget#taskListBg { background: #F2F3F7; }
+            QScrollBar:vertical { width: 6px; background: transparent; margin: 2px; }
+            QScrollBar::handle:vertical { background: #D0D2D8; border-radius: 3px; min-height: 24px; }
+            QScrollBar::handle:vertical:hover { background: #B8BDC9; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+
+            /* ── Task row ─────────────────────────────────── */
             QFrame#taskRow {
-                background: #f9fafb;
-                border: 1px solid rgba(20, 22, 27, 0.06);
-                border-radius: 18px;
-                padding: 14px;
+                background: #FFFFFF; border: 1px solid #DCDEE3; border-radius: 10px;
+            }
+            QFrame#taskRow:hover { border-color: #D0D2D8; }
+            QFrame#taskRow[status="running"] {
+                border: 1px solid rgba(39,174,96,0.45); border-left: 3px solid #27AE60;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(39,174,96,0.10), stop:0.52 #FFFFFF);
+            }
+            QFrame#taskRow[status="paused"] { border-color: rgba(224,123,53,0.40); }
+            QFrame#taskDot { border-radius: 4px; }
+            QFrame#taskDot[status="running"] { background: #27AE60; }
+            QFrame#taskDot[status="paused"]  { background: #E07B35; }
+            QFrame#taskDot[status="todo"]    { background: transparent; border: 1px solid #B8BDC9; }
+            QFrame#taskDot[status="done"]    { background: #B8BDC9; }
+            QLabel#taskName { color: #252835; font-size: 13px; }
+            QFrame#taskRow[status="done"] QLabel#taskName {
+                color: #B8BDC9; text-decoration: line-through;
+            }
+            QLabel#rowTimeLbl { color: #B8BDC9; font-size: 10px; }
+            QLabel#rowTimeSep { color: #D0D2D8; font-size: 11px; }
+            QLabel#rowTimeVal { color: #828B9A; font-size: 11px; font-family: "__MONO__"; }
+            QLabel#rowTimeVal[live="true"] { color: #27AE60; }
+
+            QWidget#rowActions { background: transparent; }
+            QPushButton#iconAction, QPushButton#iconActionDanger {
+                background: transparent; border: none; border-radius: 7px;
+                color: #B8BDC9; font-size: 14px; padding: 0;
+            }
+            QPushButton#iconAction:hover { background: #F5F6FA; color: #828B9A; }
+            QPushButton#iconActionDanger:hover { background: #FDE8E8; color: #E05353; }
+            QPushButton#linkAction {
+                background: transparent; border: none; border-radius: 7px;
+                color: #828B9A; font-size: 11px; padding: 0 9px;
+            }
+            QPushButton#linkAction:hover { background: #F5F6FA; color: #252835; }
+            QPushButton#rowStart {
+                background: #27AE60; border: none; border-radius: 7px;
+                color: #FFFFFF; font-size: 11px; font-weight: 500; padding: 0 11px;
+            }
+            QPushButton#rowStart:hover { background: #22994F; }
+            QPushButton#rowStop {
+                background: #F5F6FA; border: 1px solid #D0D2D8; border-radius: 7px;
+                color: #828B9A; font-size: 11px; font-weight: 500; padding: 0 11px;
+            }
+            QPushButton#rowStop:hover { background: #F2F3F7; color: #252835; }
+            QPushButton#rowResume {
+                background: #E8F0FD; border: none; border-radius: 7px;
+                color: #3B83F6; font-size: 11px; font-weight: 500; padding: 0 11px;
+            }
+            QPushButton#rowResume:hover { background: #DBE8FC; }
+
+            /* ── Timer panel (dark) ───────────────────────── */
+            QFrame#timerPanel {
+                background: #131720; border-left: 1px solid rgba(255,255,255,0.06);
+            }
+            QFrame#timerPanel[running="true"] { border-left: 1px solid rgba(39,174,96,0.25); }
+            QLabel#timerLbl {
+                color: rgba(255,255,255,0.28); font-size: 10px; font-weight: 500;
+                letter-spacing: 1px;
             }
             QFrame#timerCard {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #121419, stop:0.45 #1c1f27, stop:1 #30333d);
-                border-radius: 34px;
-                border: 1px solid rgba(255, 255, 255, 0.08);
-            }
-            QFrame#timerCard[active="true"] {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #0f1613, stop:0.45 #163125, stop:1 #254439);
-                border: 1px solid rgba(139, 214, 167, 0.22);
-            }
-            QTabWidget#mainTabs::pane {
-                border: none;
-                top: -1px;
-            }
-            QTabBar::tab {
-                background: transparent;
-                color: #5f6b7c;
-                padding: 8px 20px;
-                margin-right: 6px;
+                background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08);
                 border-radius: 12px;
-                font-weight: 600;
             }
-            QTabBar::tab:selected {
-                background: #151923;
-                color: white;
+            QFrame#timerCard[running="true"] {
+                background: rgba(39,174,96,0.10); border: 1px solid rgba(39,174,96,0.25);
             }
-            QTabBar::tab:hover:!selected {
-                background: rgba(21, 25, 35, 0.06);
+            QLabel#tcardName { color: rgba(255,255,255,0.75); font-size: 13px; }
+            QLabel#timerDigits {
+                color: #7EB3FA; font-family: "__MONO__"; font-size: 38px; font-weight: 300;
             }
-            QFrame#focusTabCard {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #121419, stop:0.45 #1c1f27, stop:1 #30333d);
-                border-radius: 28px;
-                border: 1px solid rgba(255, 255, 255, 0.08);
+            QFrame#timerPanel[running="true"] QLabel#timerDigits { color: #27AE60; }
+            QLabel#tcsLbl {
+                color: rgba(255,255,255,0.25); font-size: 9px; font-weight: 500; letter-spacing: 1px;
             }
-            QPushButton {
-                background: #ffffff;
-                border: 1px solid rgba(20, 22, 27, 0.12);
-                border-radius: 12px;
-                padding: 8px 14px;
-                font-weight: 600;
+            QLabel#tcsVal { color: rgba(255,255,255,0.45); font-family: "__MONO__"; font-size: 12px; }
+            QFrame#timerPanel[running="true"] QLabel#tcsVal { color: rgba(39,174,96,0.80); }
+            QProgressBar#timerProgress {
+                background: rgba(255,255,255,0.08); border: none; border-radius: 2px;
             }
-            QPushButton:hover {
-                background: #f5f7fb;
+            QProgressBar#timerProgress::chunk { background: #27AE60; border-radius: 2px; }
+            QPushButton#btnStop {
+                background: rgba(255,255,255,0.07); border: 1px solid rgba(255,255,255,0.10);
+                border-radius: 10px; color: rgba(255,255,255,0.55); font-weight: 500;
             }
-            QPushButton#primaryButton {
-                background: #151923;
-                color: white;
-                border: none;
+            QPushButton#btnStop:hover { background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.85); }
+            QPushButton#btnStop:disabled { color: rgba(255,255,255,0.22); }
+            QPushButton#btnComplete {
+                background: rgba(224,83,83,0.14); border: 1px solid rgba(224,83,83,0.20);
+                border-radius: 10px; color: #F47A7A; font-weight: 500;
             }
-            QPushButton#startButton {
-                background: #e6f6ea;
-                border: 1px solid #c5e8cf;
-                color: #2d6b40;
-            }
-            QPushButton#startButton:hover {
-                background: #ddf1e3;
-            }
-            QPushButton#stopButton {
-                background: #fde8e8;
-                border: 1px solid #f4c5c5;
-                color: #9b3c3c;
-            }
-            QPushButton#stopButton:hover {
-                background: #fbdede;
-            }
-            QPushButton#resumeButton {
-                background: #e8f0fd;
-                border: 1px solid #c7d9f8;
-                color: #3f6499;
-            }
-            QPushButton#resumeButton:hover {
-                background: #dfe9fb;
-            }
-            QPushButton#completeButton:hover {
-                background: #f5f7fb;
-            }
-            QPushButton#ghostButton {
-                background: transparent;
-                color: #5f6b7c;
-                border: none;
-                padding: 4px 8px;
-            }
-            QPushButton#ghostButton:hover {
-                background: rgba(21, 25, 35, 0.05);
-            }
-            QPushButton#deleteGhostButton {
-                background: transparent;
-                border: none;
-                padding: 4px 6px;
-                color: #454b57;
-            }
-            QPushButton#deleteGhostButton:hover {
-                background: rgba(21, 25, 35, 0.05);
-            }
-            QPushButton#settingsButton {
-                background: transparent;
-                border: none;
-                border-radius: 17px;
-                padding: 0;
-                font-size: 18px;
-                color: #5f6b7c;
-            }
-            QPushButton#settingsButton:hover {
-                background: rgba(21, 25, 35, 0.08);
-                color: #14161b;
-            }
-            QPushButton#segmentButton {
-                background: rgba(21, 25, 35, 0.06);
-                color: #5f6b7c;
-                border: none;
-                border-radius: 12px;
-                padding: 8px 16px;
-                font-weight: 600;
-            }
-            QPushButton#segmentButton:checked {
-                background: #151923;
-                color: white;
-            }
-            QPushButton#segmentButton:hover:!checked {
-                background: rgba(21, 25, 35, 0.12);
-            }
-            QPushButton#presetButton {
-                min-width: 0;
-                padding: 10px 0;
-                background: rgba(255, 255, 255, 0.08);
-                color: white;
-                border: 1px solid rgba(255, 255, 255, 0.14);
-            }
-            QPushButton#presetButton[active="true"] {
-                background: #f3c96b;
-                color: #19130a;
-                border: none;
-            }
-            QLineEdit, QPlainTextEdit, QListWidget, QDateTimeEdit {
-                background: white;
-                border: 1px solid rgba(20, 22, 27, 0.12);
-                border-radius: 12px;
-                padding: 10px 12px;
-            }
-            QLabel#sectionTitle {
-                font-size: 20px;
-                font-weight: 700;
-            }
-            QLabel#summaryLabel, QLabel#descriptionLabel, QLabel#timeLabel {
-                color: #14161b;
-            }
-            QLabel#timerHeading {
-                background: transparent;
-                color: rgba(255, 255, 255, 0.78);
-                font-size: 14px;
-            }
-            QLabel#activeTaskName {
-                background: transparent;
-                color: white;
-                font-size: 18px;
-                font-weight: 700;
-            }
-            QLabel#hoursDisplay {
-                background: transparent;
-                color: rgba(255, 255, 255, 0.72);
-                font-size: 34px;
-                font-weight: 700;
-                line-height: 1.0;
-            }
-            QLabel#minutesDisplay {
-                background: transparent;
-                color: #ffffff;
-                font-size: 76px;
-                font-weight: 800;
-                line-height: 0.92;
-                letter-spacing: 1px;
-            }
-            QLabel#secondsDisplay {
-                background: transparent;
-                color: rgba(255, 255, 255, 0.72);
-                font-size: 42px;
-                font-weight: 700;
-                line-height: 1.0;
+            QPushButton#btnComplete:hover { background: rgba(224,83,83,0.24); }
+            QPushButton#btnComplete:disabled { color: rgba(224,83,83,0.35); }
+
+            /* ── Focus page ───────────────────────────────── */
+            QFrame#focusCard {
+                background: #FFFFFF; border: 1px solid #DCDEE3; border-radius: 16px;
             }
             QLabel#focusHeading {
-                background: transparent;
-                color: white;
-                font-size: 16px;
-                font-weight: 700;
-            }
-            QLabel#focusSubheading, QLabel#focusStatusLabel {
-                background: transparent;
-                color: rgba(255, 255, 255, 0.68);
-                font-size: 12px;
+                color: #B8BDC9; font-size: 11px; font-weight: 500; letter-spacing: 2px;
             }
             QLabel#focusDisplay {
-                background: transparent;
-                color: #f8f7f2;
-                font-size: 32px;
-                font-weight: 800;
-                letter-spacing: 1px;
+                color: #3B83F6; font-family: "__MONO__"; font-size: 64px; font-weight: 300;
             }
-            """
-        )
+            QLabel#focusDisplay[done="true"] { color: #27AE60; }
+            QLabel#focusStatusLabel { color: #B8BDC9; font-size: 12px; }
+            QPushButton#focusDur {
+                background: transparent; border: 1px solid #D0D2D8; border-radius: 8px;
+                color: #828B9A; padding: 6px 12px; font-size: 12px;
+            }
+            QPushButton#focusDur:hover { background: #F5F6FA; }
+            QPushButton#focusDur[active="true"] {
+                background: #3B83F6; border: 1px solid #3B83F6; color: #FFFFFF; font-weight: 500;
+            }
+            QPushButton#focusGo {
+                background: #F5F6FA; border: 1px solid #D0D2D8; border-radius: 10px;
+                color: #828B9A; font-weight: 500; letter-spacing: 1px; padding: 0 40px;
+            }
+            QPushButton#focusGo:hover { background: #ECEEF3; color: #252835; }
+            QPushButton#focusGo:disabled { color: #B8BDC9; }
+
+            /* ── Dialogs ──────────────────────────────────── */
+            QDialog { background: #FFFFFF; }
+            QLabel#sectionTitle { color: #252835; font-size: 14px; font-weight: 500; }
+            QLabel#descriptionLabel { color: #828B9A; font-size: 12px; }
+            QCheckBox { color: #252835; spacing: 6px; }
+            QTabWidget::pane { border: 1px solid #DCDEE3; border-radius: 10px; top: -1px; }
+            QTabBar::tab {
+                background: #F5F6FA; color: #828B9A; padding: 7px 16px;
+                margin-right: 4px; border-radius: 8px; font-weight: 500;
+            }
+            QTabBar::tab:selected { background: #3B83F6; color: #FFFFFF; }
+            QProgressBar {
+                background: #E4E6EC; border: none; border-radius: 3px; text-align: center;
+                color: #828B9A;
+            }
+            QProgressBar::chunk { background: #3B83F6; border-radius: 3px; }
+        """
+        qss = qss.replace("__SANS__", self._sans_family).replace("__MONO__", self._mono_family)
+        self.setStyleSheet(qss)
 
     def refresh_ui(self) -> None:
         for key, button in self._view_buttons.items():
-            button.setChecked(key == self._current_view)
+            button.setProperty("active", key == self._current_view)
+            button.style().unpolish(button)
+            button.style().polish(button)
 
         reference_date = self._selected_date if self._current_view == "date" else None
         if reference_date:
@@ -1670,15 +1852,25 @@ class MainWindow(QMainWindow):
                 row.history_requested.connect(self._open_history)
                 row.delete_requested.connect(self._confirm_delete_task)
                 row.plan_toggle_requested.connect(self._toggle_plan)
+                self._apply_card_shadow(row)
                 self.days_layout.addWidget(row)
         self.days_layout.addStretch(1)
         self._refresh_active_panel()
+
+    def _apply_card_shadow(self, widget: QWidget) -> None:
+        """Soft drop shadow for cards (QSS has no box-shadow)."""
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(12)
+        effect.setXOffset(0)
+        effect.setYOffset(2)
+        effect.setColor(QColor(0, 0, 0, 26))
+        widget.setGraphicsEffect(effect)
 
     def _empty_hint(self) -> str:
         if self._current_view == "plan":
             return (
                 "В плане на сегодня пусто. Добавь задачи кнопкой «В план» "
-                "во вкладках «В работе» или «Все задачи»."
+                "в фильтрах «В работе» или «Все»."
             )
         if self._current_view == "in_progress":
             return "Нет незавершённых задач."
@@ -1687,32 +1879,36 @@ class MainWindow(QMainWindow):
         return "Пока нет задач."
         self._refresh_focus_panel()
 
+    def _set_timer_running(self, running: bool) -> None:
+        for widget in (self.timer_panel, self.timer_card):
+            if bool(widget.property("running")) != running:
+                widget.setProperty("running", running)
+                widget.style().unpolish(widget)
+                widget.style().polish(widget)
+                widget.update()
+
     def _refresh_active_panel(self) -> None:
         active = self.controller.active_task()
+        self._set_timer_running(active is not None)
         if not active:
-            self.timer_card.setProperty("active", False)
-            self.style().unpolish(self.timer_card)
-            self.style().polish(self.timer_card)
-            self.timer_card.update()
-            self.active_task_name.setText("Нет активной задачи")
-            self.hours_display.setText("00")
-            self.minutes_display.setText("00")
-            self.seconds_display.setText("00")
+            self.active_task_name.setText("Выберите задачу\nи нажмите Старт")
+            self.timer_digits.setText("00:00:00")
+            self.timer_today_value.setText("0:00")
+            self.timer_total_value.setText("0:00")
+            self.timer_progress.setValue(0)
             self.stop_active_button.setEnabled(False)
             self.complete_active_button.setEnabled(False)
             return
+        now = datetime.now()
+        total = active.total_seconds(now)
         self.active_task_name.setText(active.title)
-        total = active.total_seconds(datetime.now())
-        hours = total // 3600
-        minutes = (total % 3600) // 60
-        seconds = total % 60
-        self.timer_card.setProperty("active", True)
-        self.style().unpolish(self.timer_card)
-        self.style().polish(self.timer_card)
-        self.timer_card.update()
-        self.hours_display.setText(f"{hours:02d}")
-        self.minutes_display.setText(f"{minutes:02d}")
-        self.seconds_display.setText(f"{seconds:02d}")
+        self.timer_digits.setText(format_duration(total))
+        self.timer_today_value.setText(format_hm(self.controller.today_seconds(active)))
+        self.timer_total_value.setText(format_hm(total))
+        interval = max(1, self.controller.reminder_interval_minutes()) * 60
+        session = active.active_session()
+        elapsed = session.duration_seconds(now) if session else 0
+        self.timer_progress.setValue(int(min(elapsed / interval, 1.0) * 100))
         self.stop_active_button.setEnabled(True)
         self.complete_active_button.setEnabled(True)
 
@@ -1727,16 +1923,25 @@ class MainWindow(QMainWindow):
             self.focus_display.setText(f"{minutes:02d}:{seconds:02d}")
             self.focus_status_label.setText("Идет фокус-сессия")
             self.focus_stop_button.setEnabled(True)
+            self._set_focus_done(False)
         else:
             self.focus_display.setText(f"{selected_minutes:02d}:00")
             self.focus_status_label.setText("Готов к запуску")
             self.focus_stop_button.setEnabled(False)
+            self._set_focus_done(False)
 
         for minutes, button in self.focus_buttons.items():
             button.setProperty("active", minutes == selected_minutes)
             button.style().unpolish(button)
             button.style().polish(button)
             button.update()
+
+    def _set_focus_done(self, done: bool) -> None:
+        if bool(self.focus_display.property("done")) != done:
+            self.focus_display.setProperty("done", done)
+            self.focus_display.style().unpolish(self.focus_display)
+            self.focus_display.style().polish(self.focus_display)
+            self.focus_display.update()
 
     def _open_settings(self) -> None:
         dialog = SettingsDialog(self.controller, self)
@@ -2044,6 +2249,16 @@ class MainWindow(QMainWindow):
         self.controller.start_task(self._mini_task_id)
         self.refresh_ui()
         self._update_floating()
+
+    def _floating_close(self) -> None:
+        """Hide the floating widget; the timer keeps running in the background."""
+        self.floating.hide()
+        self._show_tray_message(
+            "Виджет скрыт",
+            "Таймер продолжает работать. Откройте приложение или «Показать виджет» из трея.",
+            QSystemTrayIcon.MessageIcon.Information,
+            4000,
+        )
 
     def _exit_application(self) -> None:
         active = self.controller.active_task()

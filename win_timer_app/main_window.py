@@ -886,7 +886,7 @@ class TaskRow(QFrame):
         self._name_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         layout.addWidget(self._name_label, 1)
 
-        # ── inline time block: «сег.» only ───────────────────
+        # ── inline time block: «сег.» · «всего» ───────────────
         reference = reference_date or controller.today_str()
         is_today = reference == controller.today_str()
         times = QHBoxLayout()
@@ -898,6 +898,15 @@ class TaskRow(QFrame):
         today_value.setObjectName("rowTimeVal")
         today_value.setProperty("live", self._is_running)
         times.addWidget(today_value)
+        sep = QLabel("·")
+        sep.setObjectName("rowTimeSep")
+        times.addWidget(sep)
+        total_label = QLabel("всего")
+        total_label.setObjectName("rowTimeLbl")
+        times.addWidget(total_label)
+        total_value = QLabel(format_hm(task.total_seconds(datetime.now())))
+        total_value.setObjectName("rowTimeVal")
+        times.addWidget(total_value)
         layout.addLayout(times)
 
         # ── actions: left fade + buttons, revealed on hover ───

@@ -67,6 +67,11 @@ from .controller import AppController, format_day_label, format_duration, format
 from .models import Task, TaskStatus
 from .runtime_info import build_about_report
 
+WINDOW_MIN_HEIGHT = 680
+WINDOW_VERTICAL_CHROME = 40
+FOCUS_PRESET_BUTTON_HEIGHT = 36
+FOCUS_PRESET_ROW_SPACING = 5
+
 _TRAY_TOOLTIP_FLOATING_AUTO = object()
 
 

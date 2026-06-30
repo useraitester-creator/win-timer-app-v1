@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 
+from . import focus_ops
 from .models import Session, Task, TaskStatus, make_id
 from .storage import Storage
 
@@ -17,16 +18,23 @@ class AppController:
         self.pending_confirmation_task_id: str | None = None
         self.pending_confirmation_deadline: datetime | None = None
         self.next_reminder_at: datetime | None = None
+        self.focus_paused_task_id: str | None = None
+        self.focus_session_task_id: str | None = None
+        self.focus_resume_offer_pending = False
         self._migrate()
         self.ensure_plan_rollover()
         self.state.ui.setdefault("reminder_interval_minutes", 40)
         self._rebuild_runtime_state()
+        self._sanitize_focus_timer_on_load()
+        self._finalize_expired_focus_on_load()
 
     def _focus_timer(self) -> dict[str, object]:
         focus_timer = self.state.ui.setdefault("focus_timer", {})
         focus_timer.setdefault("selected_minutes", 20)
         focus_timer.setdefault("duration_minutes", None)
         focus_timer.setdefault("ends_at", None)
+        focus_timer.setdefault("session_task_id", None)
+        focus_timer.setdefault("paused_task_id", None)
         return focus_timer
 
     def save(self) -> None:
@@ -123,6 +131,69 @@ class AppController:
             self.next_reminder_at = active.active_session().start_dt + self._reminder_interval_td()
         else:
             self.next_reminder_at = None
+        timer = self._focus_timer()
+        paused = timer.get("paused_task_id")
+        self.focus_paused_task_id = str(paused) if paused else None
+        session_task_id = timer.get("session_task_id")
+        if session_task_id and timer.get("ends_at"):
+            self.focus_session_task_id = str(session_task_id)
+        else:
+            self.focus_session_task_id = None
+
+    def _sanitize_focus_timer_on_load(self) -> None:
+        """Close orphaned focus sessions when timer state and tasks disagree."""
+        timer = self._focus_timer()
+        session_task_id = timer.get("session_task_id")
+        ends_at = timer.get("ends_at")
+        changed = False
+
+        if session_task_id and not ends_at:
+            self.focus_session_task_id = str(session_task_id)
+            self._finish_focus_session()
+            changed = True
+
+        for task in self.state.tasks:
+            if not focus_ops.is_focus_session_task(task):
+                continue
+            if task.is_completed() or task.active_session() is None:
+                continue
+            if session_task_id == task.id and ends_at:
+                continue
+            focus_ops.finish_focus_session_task(task)
+            changed = True
+
+        if changed:
+            self.save()
+
+    def _finalize_expired_focus_on_load(self) -> None:
+        timer = self._focus_timer()
+        if not timer.get("ends_at"):
+            return
+        if self.focus_remaining_seconds() > 0:
+            return
+        self.check_focus_timer()
+
+    def _set_focus_paused_task_id(self, task_id: str | None) -> None:
+        self.focus_paused_task_id = task_id
+        self._focus_timer()["paused_task_id"] = task_id
+
+    def _finish_focus_session(self, *, now: datetime | None = None) -> None:
+        now = now or datetime.now()
+        task_id = self.focus_session_task_id
+        timer = self._focus_timer()
+        if task_id is None:
+            stored = timer.get("session_task_id")
+            task_id = str(stored) if stored else None
+        if not task_id:
+            self.focus_session_task_id = None
+            timer["session_task_id"] = None
+            return
+        try:
+            focus_ops.finish_focus_session_task(self.find_task(task_id), now=now)
+        except KeyError:
+            pass
+        self.focus_session_task_id = None
+        timer["session_task_id"] = None
 
     def _reminder_interval_td(self) -> timedelta:
         return timedelta(minutes=self.reminder_interval_minutes())
@@ -338,6 +409,9 @@ class AppController:
         return session.end_dt or session.start_dt
 
     def start_task(self, task_id: str) -> Task:
+        self.stop_focus_timer()
+        self._set_focus_paused_task_id(None)
+        self.focus_resume_offer_pending = False
         now = datetime.now()
         current = self.active_task()
         if current and current.id != task_id:
@@ -392,6 +466,14 @@ class AppController:
         return self.start_task(task_id)
 
     def delete_task(self, task_id: str) -> None:
+        timer = self._focus_timer()
+        if task_id == self.focus_session_task_id or timer.get("session_task_id") == task_id:
+            self._finish_focus_session()
+            timer["ends_at"] = None
+            timer["duration_minutes"] = None
+        if task_id == self.focus_paused_task_id:
+            self._set_focus_paused_task_id(None)
+            self.focus_resume_offer_pending = False
         task = self.find_task(task_id)
         if task.status == TaskStatus.RUNNING and task.active_session():
             self.stop_task(task_id)
@@ -414,17 +496,52 @@ class AppController:
         return dict(self._focus_timer())
 
     def start_focus_timer(self, minutes: int) -> None:
+        now = datetime.now()
+        active = self.active_task()
+        panel_task = self.timer_panel_task()
+        pause_task = active
+        if pause_task is None and panel_task is not None and not panel_task.is_completed():
+            pause_task = panel_task
+
+        self._set_focus_paused_task_id(None)
+        if pause_task is not None:
+            if pause_task.status == TaskStatus.RUNNING:
+                self.stop_task(pause_task.id, now=now)
+                self.next_reminder_at = None
+            self._set_focus_paused_task_id(pause_task.id)
+
+        self._finish_focus_session(now=now)
+
+        focus_task = focus_ops.create_focus_session_task(
+            self.state.tasks,
+            self.today_str(),
+            minutes,
+            now=now,
+        )
+        self.focus_session_task_id = focus_task.id
+
         focus_timer = self._focus_timer()
         focus_timer["selected_minutes"] = minutes
         focus_timer["duration_minutes"] = minutes
-        focus_timer["ends_at"] = (datetime.now() + timedelta(minutes=minutes)).isoformat()
+        focus_timer["ends_at"] = (now + timedelta(minutes=minutes)).isoformat()
+        focus_timer["session_task_id"] = focus_task.id
+        self.focus_resume_offer_pending = False
         self.save()
 
     def stop_focus_timer(self) -> None:
+        self._finish_focus_session()
         focus_timer = self._focus_timer()
         focus_timer["ends_at"] = None
         focus_timer["duration_minutes"] = None
         self.save()
+
+    def take_focus_paused_task_id(self) -> str | None:
+        task_id = self.focus_paused_task_id
+        self._set_focus_paused_task_id(None)
+        self.focus_resume_offer_pending = False
+        if task_id is not None:
+            self.save()
+        return task_id
 
     def focus_remaining_seconds(self) -> int:
         focus_timer = self._focus_timer()
@@ -436,14 +553,18 @@ class AppController:
 
     def check_focus_timer(self) -> tuple[str, int | None]:
         focus_timer = self._focus_timer()
-        ends_at = focus_timer.get("ends_at")
-        if not ends_at:
+        planned_end = focus_timer.get("ends_at")
+        if not planned_end:
             return ("idle", None)
-        end_dt = datetime.fromisoformat(str(ends_at))
+        end_dt = datetime.fromisoformat(str(planned_end))
         if datetime.now() >= end_dt:
             duration_minutes = focus_timer.get("duration_minutes")
             focus_timer["ends_at"] = None
             focus_timer["duration_minutes"] = None
+            end = end_dt
+            self._finish_focus_session(now=end)
+            if self.focus_paused_task_id:
+                self.focus_resume_offer_pending = True
             self.save()
             if isinstance(duration_minutes, int):
                 return ("finished", duration_minutes)

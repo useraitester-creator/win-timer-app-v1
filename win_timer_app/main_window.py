@@ -52,7 +52,6 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QStackedWidget,
     QStyle,
     QSystemTrayIcon,
     QTabWidget,
@@ -1558,7 +1557,6 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(self.app_icon)
         self.setWindowTitle("Task Timer")
         self.resize(980, 680)
-        self.setMinimumSize(800, 600)
         self.create_dialog = CreateTaskDialog(self.controller, self)
         self.create_dialog.create_requested.connect(self._create_task)
         self._mini_task_id: str | None = None
@@ -1572,11 +1570,14 @@ class MainWindow(QMainWindow):
         self._build_tray()
         self._apply_styles()
         self.refresh_ui()
+        self._update_main_window_min_height()
 
         self.clock_timer = QTimer(self)
         self.clock_timer.setInterval(1000)
         self.clock_timer.timeout.connect(self._tick)
         self.clock_timer.start()
+
+        QTimer.singleShot(350, self._offer_focus_resume_if_pending)
 
     def _load_fonts(self) -> None:
         """Register bundled fonts (if any) and resolve Inter / Roboto Mono."""
@@ -1615,14 +1616,9 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         root_layout.addWidget(self._build_sidebar())
-
-        self.pages = QStackedWidget()
-        self.pages.addWidget(self._build_tasks_page())  # index 0 — Задачи
-        self.pages.addWidget(self._build_focus_page())  # index 1 — Фокус
-        root_layout.addWidget(self.pages, 1)
+        root_layout.addWidget(self._build_tasks_page(), 1)
 
         self.setCentralWidget(central)
-        self._set_page(0)
 
     def _build_sidebar(self) -> QWidget:
         bar = QFrame()
@@ -1639,16 +1635,13 @@ class MainWindow(QMainWindow):
         layout.addWidget(logo, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addSpacing(12)
 
-        self._nav_buttons: dict[int, QPushButton] = {}
-        for index, (glyph, tip) in enumerate((("≣", "Задачи"), ("◎", "Фокус"))):
-            button = QPushButton(glyph)
-            button.setObjectName("navButton")
-            button.setFixedSize(38, 38)
-            button.setToolTip(tip)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(lambda _checked=False, i=index: self._set_page(i))
-            self._nav_buttons[index] = button
-            layout.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
+        tasks_button = QPushButton("≣")
+        tasks_button.setObjectName("navButton")
+        tasks_button.setFixedSize(38, 38)
+        tasks_button.setToolTip("Задачи")
+        tasks_button.setProperty("active", True)
+        tasks_button.setEnabled(False)
+        layout.addWidget(tasks_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
         layout.addStretch(1)
 
@@ -1661,13 +1654,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(settings_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
         return bar
-
-    def _set_page(self, index: int) -> None:
-        self.pages.setCurrentIndex(index)
-        for i, button in self._nav_buttons.items():
-            button.setProperty("active", i == index)
-            button.style().unpolish(button)
-            button.style().polish(button)
 
     def _build_tasks_page(self) -> QWidget:
         page = QWidget()
@@ -1812,8 +1798,6 @@ class MainWindow(QMainWindow):
         self.timer_progress.setValue(0)
         layout.addWidget(self.timer_progress)
 
-        layout.addStretch(1)
-
         self.stop_active_button = QPushButton("Стоп")
         self.stop_active_button.setObjectName("btnStop")
         self.stop_active_button.setFixedHeight(38)
@@ -1829,67 +1813,166 @@ class MainWindow(QMainWindow):
         self.complete_active_button.clicked.connect(self._complete_active)
         layout.addWidget(self.complete_active_button)
 
+        layout.addSpacing(12)
+        self.focus_section = self._build_focus_section()
+        layout.addWidget(self.focus_section)
+
         return panel
 
-    def _build_focus_page(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("focusPage")
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(40, 30, 40, 30)
-        outer.setSpacing(0)
-        outer.addStretch(1)
+    def _build_focus_section(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("focusPanel")
+        panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
 
-        row = QHBoxLayout()
-        row.addStretch(1)
-
-        focus_card = QFrame()
-        focus_card.setObjectName("focusCard")
-        focus_card.setMinimumWidth(380)
-        focus_card.setMaximumWidth(520)
-        focus_layout = QVBoxLayout(focus_card)
-        focus_layout.setContentsMargins(40, 36, 40, 36)
-        focus_layout.setSpacing(22)
+        self.focus_card = QFrame()
+        self.focus_card.setObjectName("focusCard")
+        self.focus_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        focus_layout = QVBoxLayout(self.focus_card)
+        focus_layout.setContentsMargins(14, 16, 14, 16)
+        focus_layout.setSpacing(12)
+        focus_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         focus_title = QLabel("РЕЖИМ КОНЦЕНТРАЦИИ")
         focus_title.setObjectName("focusHeading")
         focus_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        focus_layout.addWidget(focus_title)
+        focus_layout.addWidget(focus_title, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.focus_display = QLabel("20:00")
         self.focus_display.setObjectName("focusDisplay")
         self.focus_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        focus_layout.addWidget(self.focus_display)
+        focus_layout.addWidget(self.focus_display, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.focus_status_label = QLabel("Готов к запуску")
         self.focus_status_label.setObjectName("focusStatusLabel")
         self.focus_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        focus_layout.addWidget(self.focus_status_label)
+        focus_layout.addWidget(self.focus_status_label, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        preset_layout = QHBoxLayout()
-        preset_layout.setSpacing(5)
-        preset_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.focus_buttons: dict[int, QPushButton] = {}
-        for minutes in self.focus_presets:
-            button = QPushButton(f"{minutes} мин")
-            button.setObjectName("focusDur")
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.clicked.connect(lambda _checked=False, value=minutes: self._start_focus_timer(value))
-            self.focus_buttons[minutes] = button
-            preset_layout.addWidget(button)
-        focus_layout.addLayout(preset_layout)
+        preset_wrap = QWidget()
+        preset_wrap.setObjectName("focusPresetWrap")
+        preset_wrap.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        preset_layout = QVBoxLayout(preset_wrap)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        preset_layout.setSpacing(FOCUS_PRESET_ROW_SPACING)
+        preset_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        preset_rows = 0
+        for row_minutes in ((5, 10, 20), (30, 40)):
+            row = QHBoxLayout()
+            row.setSpacing(5)
+            row.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            for minutes in row_minutes:
+                button = QPushButton(f"{minutes} мин")
+                button.setObjectName("focusDur")
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.setFixedHeight(FOCUS_PRESET_BUTTON_HEIGHT)
+                button.setSizePolicy(
+                    QSizePolicy.Policy.Fixed,
+                    QSizePolicy.Policy.Fixed,
+                )
+                button.clicked.connect(
+                    lambda _checked=False, value=minutes: self._start_focus_timer(value)
+                )
+                self.focus_buttons[minutes] = button
+                row.addWidget(button)
+            preset_layout.addLayout(row)
+            preset_rows += 1
+        preset_wrap.setMinimumHeight(
+            preset_rows * FOCUS_PRESET_BUTTON_HEIGHT
+            + max(0, preset_rows - 1) * FOCUS_PRESET_ROW_SPACING
+        )
+        focus_layout.addWidget(preset_wrap, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.focus_stop_button = QPushButton("Остановить таймер")
         self.focus_stop_button.setObjectName("focusGo")
-        self.focus_stop_button.setFixedHeight(40)
+        self.focus_stop_button.setFixedHeight(38)
         self.focus_stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.focus_stop_button.clicked.connect(self._stop_focus_timer)
         focus_layout.addWidget(self.focus_stop_button)
 
-        row.addWidget(focus_card)
-        row.addStretch(1)
-        outer.addLayout(row)
-        outer.addStretch(1)
-        return page
+        panel_layout.addWidget(self.focus_card)
+        return panel
+
+    def _relayout_timer_card(self) -> None:
+        card_layout = self.timer_card.layout()
+        panel_layout = self.timer_panel.layout()
+        if card_layout is None or panel_layout is None:
+            return
+        card_layout.invalidate()
+        card_layout.activate()
+        card_height = self.timer_card.sizeHint().height()
+        self.timer_card.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.timer_card.setFixedHeight(card_height)
+        self._sync_focus_section_height()
+        panel_layout.invalidate()
+        panel_layout.activate()
+        self.timer_panel.updateGeometry()
+        self.timer_card.updateGeometry()
+        self._update_main_window_min_height()
+
+    def _main_window_min_height(self) -> int:
+        self._sync_focus_section_height()
+        panel_height = self.timer_panel.sizeHint().height()
+        menu_height = (
+            self.menuBar().height()
+            if self.menuBar() is not None
+            else WINDOW_VERTICAL_CHROME
+        )
+        return max(WINDOW_MIN_HEIGHT, panel_height + menu_height + 4)
+
+    def _update_main_window_min_height(self) -> None:
+        min_height = self._main_window_min_height()
+        if self.minimumHeight() != min_height:
+            self.setMinimumHeight(min_height)
+
+    def _sync_focus_section_height(self) -> None:
+        focus_layout = self.focus_card.layout()
+        panel_layout = self.timer_panel.layout()
+        if focus_layout is None or panel_layout is None:
+            return
+        focus_layout.invalidate()
+        focus_layout.activate()
+        height = self.focus_card.sizeHint().height()
+        self.focus_card.setMinimumHeight(height)
+        self.focus_section.setMinimumHeight(height)
+
+    def _offer_focus_resume_if_pending(self) -> None:
+        if not self.controller.focus_resume_offer_pending:
+            return
+        paused_id = self.controller.focus_paused_task_id
+        if not paused_id:
+            self.controller.focus_resume_offer_pending = False
+            return
+        self.controller.focus_resume_offer_pending = False
+        self._prompt_focus_resume(paused_id)
+
+    def _prompt_focus_resume(self, paused_task_id: str) -> None:
+        try:
+            task = self.controller.find_task(paused_task_id)
+        except KeyError:
+            self.controller.take_focus_paused_task_id()
+            return
+        if task.is_completed():
+            self.controller.take_focus_paused_task_id()
+            return
+        answer = QMessageBox.question(
+            self,
+            "Фокус-сессия завершена",
+            f"Время концентрации вышло.\n\nПродолжить задачу «{task.title}»?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        self.controller.take_focus_paused_task_id()
+        if answer == QMessageBox.StandardButton.Yes:
+            self.controller.start_task(paused_task_id)
+        self.refresh_ui()
 
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self.app_icon, self)
@@ -1928,7 +2011,7 @@ class MainWindow(QMainWindow):
         qss = """
             /* ── Base ─────────────────────────────────────── */
             QWidget { background: #F2F3F7; color: #252835; font-family: "__SANS__"; }
-            QMainWindow, QWidget#rootArea, QWidget#tasksPage, QWidget#focusPage { background: #F2F3F7; }
+            QMainWindow, QWidget#rootArea, QWidget#tasksPage { background: #F2F3F7; }
             QLabel { background: transparent; }
             QToolTip {
                 background: #252835; color: #FFFFFF; border: none;
@@ -2105,29 +2188,32 @@ class MainWindow(QMainWindow):
             QPushButton#btnComplete:hover { background: rgba(224,83,83,0.24); }
             QPushButton#btnComplete:disabled { color: rgba(224,83,83,0.35); }
 
-            /* ── Focus page ───────────────────────────────── */
+            /* ── Focus card (under timer) ────────────────── */
+            QFrame#focusPanel { background: transparent; }
             QFrame#focusCard {
-                background: #FFFFFF; border: 1px solid #DCDEE3; border-radius: 16px;
+                background: #FFFFFF; border: 1px solid #DCDEE3; border-radius: 12px;
             }
+            QWidget#focusPresetWrap { background: transparent; }
             QLabel#focusHeading {
-                color: #B8BDC9; font-size: 11px; font-weight: 500; letter-spacing: 2px;
+                color: #B8BDC9; font-size: 10px; font-weight: 500; letter-spacing: 1.5px;
             }
             QLabel#focusDisplay {
-                color: #3B83F6; font-family: "__MONO__"; font-size: 64px; font-weight: 300;
+                color: #3B83F6; font-family: "__MONO__"; font-size: 44px; font-weight: 300;
             }
             QLabel#focusDisplay[done="true"] { color: #27AE60; }
-            QLabel#focusStatusLabel { color: #B8BDC9; font-size: 12px; }
+            QLabel#focusStatusLabel { color: #B8BDC9; font-size: 11px; }
             QPushButton#focusDur {
-                background: transparent; border: 1px solid #D0D2D8; border-radius: 8px;
-                color: #828B9A; padding: 6px 12px; font-size: 12px;
+                background: #F5F6FA; border: 1px solid #D0D2D8; border-radius: 10px;
+                color: #828B9A; padding: 5px 7px; font-size: 12px; min-width: 0;
+                min-height: 24px;
             }
-            QPushButton#focusDur:hover { background: #F5F6FA; }
+            QPushButton#focusDur:hover { background: #ECEEF3; }
             QPushButton#focusDur[active="true"] {
                 background: #3B83F6; border: 1px solid #3B83F6; color: #FFFFFF; font-weight: 500;
             }
             QPushButton#focusGo {
-                background: #F5F6FA; border: 1px solid #D0D2D8; border-radius: 10px;
-                color: #828B9A; font-weight: 500; letter-spacing: 1px; padding: 0 40px;
+                background: #FFFFFF; border: 1px solid #D0D2D8; border-radius: 10px;
+                color: #828B9A; font-weight: 500; letter-spacing: 1px;
             }
             QPushButton#focusGo:hover { background: #ECEEF3; color: #252835; }
             QPushButton#focusGo:disabled { color: #B8BDC9; }
@@ -2269,7 +2355,6 @@ class MainWindow(QMainWindow):
         if self._current_view == "date" and self._selected_date:
             return f"Нет задач с затраченным временем за {format_day_label(self._selected_date)}."
         return "Пока нет задач."
-        self._refresh_focus_panel()
 
     def _set_timer_running(self, running: bool) -> None:
         for widget in (self.timer_panel, self.timer_card):
@@ -2280,29 +2365,41 @@ class MainWindow(QMainWindow):
                 widget.update()
 
     def _refresh_active_panel(self) -> None:
-        active = self.controller.active_task()
-        self._set_timer_running(active is not None)
-        if not active:
+        panel_task = self.controller.timer_panel_task()
+        timer_running = (
+            panel_task is not None
+            and panel_task.status == TaskStatus.RUNNING
+            and panel_task.active_session() is not None
+        )
+        self._set_timer_running(timer_running)
+        if not panel_task:
             self.active_task_name.setText("Выберите задачу\nи нажмите Старт")
             self.timer_digits.setText("00:00:00")
             self.timer_today_value.setText("0:00")
             self.timer_total_value.setText("0:00")
             self.timer_progress.setValue(0)
+            self.stop_active_button.setText("Стоп")
             self.stop_active_button.setEnabled(False)
             self.complete_active_button.setEnabled(False)
+            self._relayout_timer_card()
             return
         now = datetime.now()
-        total = active.total_seconds(now)
-        self.active_task_name.setText(active.title)
+        total = panel_task.total_seconds(now)
+        self.active_task_name.setText(panel_task.title)
         self.timer_digits.setText(format_duration(total))
-        self.timer_today_value.setText(format_hm(self.controller.today_seconds(active)))
+        self.timer_today_value.setText(format_hm(self.controller.today_seconds(panel_task)))
         self.timer_total_value.setText(format_hm(total))
         interval = max(1, self.controller.reminder_interval_minutes()) * 60
-        session = active.active_session()
+        session = panel_task.active_session()
         elapsed = session.duration_seconds(now) if session else 0
         self.timer_progress.setValue(int(min(elapsed / interval, 1.0) * 100))
+        if timer_running:
+            self.stop_active_button.setText("Стоп")
+        else:
+            self.stop_active_button.setText("Продолжить")
         self.stop_active_button.setEnabled(True)
         self.complete_active_button.setEnabled(True)
+        self._relayout_timer_card()
 
     def _refresh_focus_panel(self) -> None:
         focus_state = self.controller.focus_timer_state()
@@ -2410,7 +2507,7 @@ class MainWindow(QMainWindow):
 
     def _start_focus_timer(self, minutes: int) -> None:
         self.controller.start_focus_timer(minutes)
-        self._refresh_focus_panel()
+        self.refresh_ui()
         self._show_tray_message(
             "Режим концентрации",
             f"Запущен таймер на {minutes} мин.",
@@ -2419,8 +2516,11 @@ class MainWindow(QMainWindow):
         )
 
     def _stop_focus_timer(self) -> None:
+        paused_id = self.controller.focus_paused_task_id
         self.controller.stop_focus_timer()
-        self._refresh_focus_panel()
+        self.refresh_ui()
+        if paused_id:
+            self._prompt_focus_resume(paused_id)
 
     def _start_task(self, task_id: str) -> None:
         self.controller.start_task(task_id)
@@ -2520,14 +2620,18 @@ class MainWindow(QMainWindow):
             self.refresh_ui()
 
     def _stop_active(self) -> None:
-        active = self.controller.active_task()
-        if active:
-            self._stop_task(active.id)
+        panel_task = self.controller.timer_panel_task()
+        if not panel_task:
+            return
+        if panel_task.status == TaskStatus.RUNNING and panel_task.active_session():
+            self._stop_task(panel_task.id)
+        else:
+            self._start_task(panel_task.id)
 
     def _complete_active(self) -> None:
-        active = self.controller.active_task()
-        if active:
-            self._confirm_complete_task(active.id)
+        panel_task = self.controller.timer_panel_task()
+        if panel_task:
+            self._confirm_complete_task(panel_task.id)
 
     def _tick(self) -> None:
         status, task = self.controller.check_reminders()
@@ -2548,6 +2652,7 @@ class MainWindow(QMainWindow):
         self._update_floating()
         self._update_tray_tooltip()
         if focus_status == "finished":
+            paused_task_id = self.controller.focus_paused_task_id
             QApplication.beep()
             QApplication.beep()
             QApplication.beep()
@@ -2558,11 +2663,17 @@ class MainWindow(QMainWindow):
                 QSystemTrayIcon.MessageIcon.Information,
                 6000,
             )
-            QMessageBox.information(
-                self,
-                "Фокус-сессия завершена",
-                "Время концентрации вышло.",
-            )
+            if paused_task_id:
+                self._prompt_focus_resume(paused_task_id)
+            else:
+                self.controller.take_focus_paused_task_id()
+                self.refresh_ui()
+                QMessageBox.information(
+                    self,
+                    "Фокус-сессия завершена",
+                    "Время концентрации вышло.",
+                )
+            return
 
     def _show_continue_prompt(self, task: Task) -> None:
         minutes = self.controller.reminder_interval_minutes()
